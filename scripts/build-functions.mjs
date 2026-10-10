@@ -10,9 +10,9 @@
  * Бандлер — rolldown из дерева (собственный бандлер vite 8; esbuild в проекте
  * отсутствует, новых зависимостей не добавляем). Опции аналогичны
  * esbuild-набору {bundle, platform:'node', format:'esm'}; явного target нет —
- * исходники es2023, Node 20 покрывает без даунлевела. api/ — генерат
- * (в .gitignore), источников там нет; скрипт пересоздаёт папку целиком —
- * идемпотентен и не оставляет устаревших файлов.
+ * исходники es2023, Node 20 покрывает без даунлевела. api/ — генерат,
+ * источников там нет; скрипт пересоздаёт папку целиком — идемпотентен и не
+ * оставляет устаревших файлов.
  */
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { rolldown } from 'rolldown';
@@ -34,6 +34,9 @@ const FUNCTIONS = [
     { in: 'sweep', out: 'sweep.js' },
     // бывший api/sweep/[id].ts — path-параметр через контекст Vercel
     { in: 'sweep-id', out: 'sweep/[id].js' },
+    { in: 'sessions', out: 'sessions.js' },
+    // api/sessions/[id].js — PUT (создать/переименовать) и DELETE слота
+    { in: 'sessions-id', out: 'sessions/[id].js' },
     { in: 'methodology', out: 'methodology.js' },
     { in: 'ping', out: 'ping.js' },
 ];

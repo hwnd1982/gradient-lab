@@ -61,6 +61,31 @@ export function parseStateBody(value: unknown): BlockState {
     return parsed.data;
 }
 
+/** Дефолтная сессия прода: заголовок X-Lab-Session не задан/пуст (см. API.md «Сессии»). */
+export const DEFAULT_SESSION = 'default';
+
+/** Допустимый id сессии: [a-zA-Z0-9_-], 1..64 символа. */
+export const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/** id sweep — uuid (crypto.randomUUID), в ключе Upstash допустимы [a-zA-Z0-9-]. */
+export const SWEEP_ID_RE = /^[a-zA-Z0-9-]+$/;
+
+/**
+ * Сессия из заголовка X-Lab-Session (прод): без заголовка — 'default',
+ * невалидный id — 400. Клиент шлёт его из sessionStorage, агент — выбирает
+ * свой слот доски (мульти-сессионность, см. API.md «Сессии»).
+ */
+export function sessionFromRequest(req: Request): string {
+    const raw = req.headers.get('x-lab-session');
+    const id = raw === null || raw === '' ? DEFAULT_SESSION : raw;
+    if (!SESSION_ID_RE.test(id)) {
+        throw new HttpError(400, {
+            error: `невалидный X-Lab-Session «${id}»: допустимы [a-zA-Z0-9_-], 1..64 символа`,
+        });
+    }
+    return id;
+}
+
 /**
  * Мутации можно закрыть токеном: env LAB_API_TOKEN (сервер) + VITE_LAB_TOKEN
  * (клиент, тот же токен). Не задан — авторизация выключена. Нет заголовка —

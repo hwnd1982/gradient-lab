@@ -29,7 +29,7 @@ npm run lint
 
 ## Agent API
 
-HTTP API для ИИ-агентов: live чтение/запись стейта, JSON-схема, warnings/analysis/journal, пресеты. Работает в двух режимах: dev — Vite-middleware на `npm run dev` (:5180, SSE); прод — функции Vercel `server/functions/*.ts` (бандлятся в `api/`) + Upstash Redis (поллинг версий вместо SSE). Описание с curl-примерами — [API.md](./API.md).
+HTTP API для ИИ-агентов: live чтение/запись стейта, JSON-схема, warnings/analysis/journal, пресеты. Работает в двух режимах: dev — Vite-middleware на `npm run dev` (:5180, SSE); прод — функции Vercel `server/functions/*.ts` (бандлятся в `api/`) + Upstash Redis (поллинг версий вместо SSE; мульти-сессии: заголовок `X-Lab-Session`, список `GET /api/sessions`, join-ссылки `?join=<id>` — детали в API.md, раздел «Сессии»). Описание с curl-примерами — [API.md](./API.md).
 
 ## Промт для агента
 

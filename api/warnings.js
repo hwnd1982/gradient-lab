@@ -5999,6 +5999,21 @@ async function readJsonBody(req) {
 		throw new HttpError(400, { error: "тело запроса не является JSON" });
 	}
 }
+/** Дефолтная сессия прода: заголовок X-Lab-Session не задан/пуст (см. API.md «Сессии»). */
+const DEFAULT_SESSION = "default";
+/** Допустимый id сессии: [a-zA-Z0-9_-], 1..64 символа. */
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+/**
+* Сессия из заголовка X-Lab-Session (прод): без заголовка — 'default',
+* невалидный id — 400. Клиент шлёт его из sessionStorage, агент — выбирает
+* свой слот доски (мульти-сессионность, см. API.md «Сессии»).
+*/
+function sessionFromRequest(req) {
+	const raw = req.headers.get("x-lab-session");
+	const id = raw === null || raw === "" ? DEFAULT_SESSION : raw;
+	if (!SESSION_ID_RE.test(id)) throw new HttpError(400, { error: `невалидный X-Lab-Session «${id}»: допустимы [a-zA-Z0-9_-], 1..64 символа` });
+	return id;
+}
 /**
 * Мутации можно закрыть токеном: env LAB_API_TOKEN (сервер) + VITE_LAB_TOKEN
 * (клиент, тот же токен). Не задан — авторизация выключена. Нет заголовка —
@@ -6022,21 +6037,30 @@ function requireMutationAuth(req) {
 * в теле (документированный путь Upstash для больших значений: стейты с
 * dataURL-картинками бывают на мегабайты, URL-путь их не вместит).
 */
-/** Ключи (см. API.md «Прод (Vercel) → ключи Upstash»). */
+/** Ключи (см. API.md «Прод (Vercel)» и «Сессии»). */
 const K = {
-	/** {version, state, analysisReq?, sweepReq?} — одним ключом: полл-тик = 1 команда */
-	state: "lab:state",
-	/** счётчик версий стейта (INCR при каждой записи) */
-	statever: "lab:statever",
-	warnings: "lab:warnings",
-	analysis: "lab:analysis",
+	legacyState: "lab:state",
+	legacyStatever: "lab:statever",
+	legacyWarnings: "lab:warnings",
+	legacyAnalysis: "lab:analysis",
+	/** индекс сессий [{id, name, updatedAt}], cap SESSIONS_LIMIT */
+	sessions: "lab:sessions",
+	/** журнал итераций — ОБЩИЙ для всех сессий (общая лента подбора) */
 	journal: "lab:journal",
-	/** индекс имён пресетов (JSON-массив) */
+	/** индекс имён пресетов (JSON-массив) — пресеты глобальны */
 	presetIndex: "lab:presets",
 	preset: (name) => `lab:preset:${name}`,
-	/** результат sweep по id (TTL не нужен — перетирается следующим заходом) */
-	sweep: (id) => `lab:sweep:${id}`
+	/** {version, state, analysisReq?, sweepReq?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
+	state: (id) => `lab:s/${id}`,
+	/** счётчик версий стейта слота (INCR при каждой записи) */
+	statever: (id) => `lab:s/${id}/ver`,
+	warnings: (id) => `lab:s/${id}/warnings`,
+	analysis: (id) => `lab:s/${id}/analysis`,
+	/** результат sweep по id (TTL не нужен — перетирается следующим заходом); id сессии в ключе, чтобы чужой sweep не читался */
+	sweep: (id, sweepId) => `lab:s/${id}/sweep/${sweepId}`
 };
+/** Вместимость индекса сессий: при переполнении выкидываем самые неактивные. */
+const SESSIONS_LIMIT = 50;
 const NOT_CONFIGURED_ERROR = { error: "prod API не настроен: добавь Upstash-интеграцию (KV_REST_API_URL/KV_REST_API_TOKEN)" };
 /** env от Upstash-интеграции Vercel; null — интеграция не подключена. */
 function kvEnv() {
@@ -6100,16 +6124,98 @@ async function kvWriteJson(key, value) {
 		body: JSON.stringify(value)
 	});
 }
+async function kvDelete(key) {
+	await kvRequest(`del/${encodeURIComponent(key)}`);
+}
+/** Прочитать индекс сессий (как есть, порядок — по updatedAt по возрастанию). */
+async function readIndex() {
+	return await kvReadJson(K.sessions) ?? [];
+}
+/**
+* Upsert строки сессии в индекс (cap 50: выкидываем самые неактивные —
+* сортировка по updatedAt). Не транзакционно, как весь стор: потерянная
+* параллельным пишущим строка самовосстанавливается следующим touchIndex
+* этой сессии (слот при обращении пересоздаёт строку).
+*/
+async function touchIndex(id, name) {
+	const next = (await readIndex()).filter((e) => e.id !== id);
+	next.push({
+		id,
+		name,
+		updatedAt: Date.now()
+	});
+	next.sort((a, b) => a.updatedAt - b.updatedAt);
+	const capped = next.length > SESSIONS_LIMIT ? next.slice(next.length - SESSIONS_LIMIT) : next;
+	await kvWriteJson(K.sessions, capped);
+}
+/**
+* Разовая миграция односессионной эпохи → слот default: lab:state (плюс
+* счётчик/warnings/analysis) переносится в lab:s/default*, legacy-ключи
+* удаляются. Вызывается только при первом обращении к default, когда слота
+* ещё нет. Не транзакционно (как весь стор): параллельные первые обращения
+* читают одни и те же legacy-ключи и пишут эквивалентный слот.
+*/
+async function migrateLegacyDefault() {
+	const legacy = await kvReadJson(K.legacyState);
+	if (legacy === null) return null;
+	const session = {
+		...legacy,
+		name: DEFAULT_SESSION,
+		updatedAt: Date.now()
+	};
+	await kvWriteJson(K.state(DEFAULT_SESSION), session);
+	const ver = await kvReadJson(K.legacyStatever);
+	await kvWriteJson(K.statever(DEFAULT_SESSION), ver ?? legacy.version);
+	const warnings = await kvReadJson(K.legacyWarnings);
+	if (warnings !== null) await kvWriteJson(K.warnings(DEFAULT_SESSION), warnings);
+	const analysis = await kvReadJson(K.legacyAnalysis);
+	if (analysis !== null) await kvWriteJson(K.analysis(DEFAULT_SESSION), analysis);
+	await kvDelete(K.legacyState);
+	await kvDelete(K.legacyStatever);
+	await kvDelete(K.legacyWarnings);
+	await kvDelete(K.legacyAnalysis);
+	await touchIndex(DEFAULT_SESSION, DEFAULT_SESSION);
+	return session;
+}
+/**
+* Слот сессии по обращению — лениво: несуществующая сессия создаётся с пустым
+* стейтом (версия 0) и попадает в индекс; DELETE /api/sessions/<id> сюда не
+* ходит (там 404 на несуществующую). Для default при первом обращении
+* переносит legacy lab:state (см. migrateLegacyDefault). Существующий слот —
+* ровно 1 команда (полл-тик дешевле не сделать).
+*/
+async function ensureSession(id) {
+	const existing = await kvReadJson(K.state(id));
+	if (existing !== null) return existing;
+	if (id === "default") {
+		const migrated = await migrateLegacyDefault();
+		if (migrated !== null) return migrated;
+	}
+	const raced = await kvReadJson(K.state(id));
+	if (raced !== null) return raced;
+	const fresh = {
+		version: 0,
+		state: null,
+		name: id,
+		updatedAt: Date.now()
+	};
+	await kvWriteJson(K.state(id), fresh);
+	await touchIndex(id, id);
+	return fresh;
+}
 //#endregion
 //#region server/functions/warnings.ts
 /**
-* GET /api/warnings — борт-контроль старта. До первого POST — 404 с
-* cleared:true (как в dev), чтобы агент не ждал «пусто» как ошибку.
+* GET /api/warnings — борт-контроль старта сессии (X-Lab-Session; несуществующая
+* создаётся лениво). До первого POST — 404 с cleared:true (как в dev), чтобы
+* агент не ждал «пусто» как ошибку.
 */
-async function GET() {
+async function GET(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
-		const stored = await kvReadJson(K.warnings);
+		const sessionId = sessionFromRequest(req);
+		await ensureSession(sessionId);
+		const stored = await kvReadJson(K.warnings(sessionId));
 		if (stored === null) return json(404, {
 			cleared: true,
 			error: "предупреждения ещё не синкались: откройте приложение в браузере — оно шлёт POST /api/warnings"
@@ -6119,19 +6225,22 @@ async function GET() {
 }
 /**
 * POST /api/warnings (прод-аналог dev POST /api/__warnings) — браузер шлёт
-* предупреждения (debounce ~400ms). Cleared-семантика как в dev: payload
-* {"cleared":true} хранится как «пусто» — GET не отдаёт устаревший список.
+* предупреждения (debounce ~400ms) в слот своей сессии. Cleared-семантика как
+* в dev: payload {"cleared":true} хранится как «пусто» — GET не отдаёт
+* устаревший список.
 */
 async function POST(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		requireMutationAuth(req);
+		const sessionId = sessionFromRequest(req);
+		await ensureSession(sessionId);
 		const parsed = WarningsPayloadSchema.safeParse(await readJsonBody(req));
 		if (!parsed.success) return json(400, {
 			error: "invalid warnings payload",
 			issues: parsed.error.issues
 		});
-		await kvWriteJson(K.warnings, parsed.data);
+		await kvWriteJson(K.warnings(sessionId), parsed.data);
 		return json(200, { ok: true });
 	});
 }

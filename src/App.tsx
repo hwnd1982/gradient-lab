@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { CodePanel } from './components/CodePanel';
+import { HeaderSession } from './components/HeaderSession';
 import { Inspector } from './components/Inspector';
 import { PresetDrawer } from './components/PresetDrawer';
 import { Stage } from './components/Stage';
@@ -10,6 +11,7 @@ import { computeAnalysis } from './lib/analysis';
 import { pollDelayMs } from './lib/backoff';
 import { computeHint } from './lib/hint';
 import { getCanvas, getImage } from './lib/imageCache';
+import { currentSession, setSession } from './lib/session';
 import { shouldSendSync } from './lib/syncGate';
 import { decodeState, encodeState } from './lib/shareUrl';
 import { validateStart } from './lib/validate';
@@ -63,16 +65,21 @@ function usePasteImage() {
  *
  * dev: SSE (/api/events) + POST /api/__sync в кэш сервера; стейт, применённый
  * из SSE (по ссылке), НЕ уходит обратно — браузерное эхо не перетирает поля
- * агентского PUT, юзерские правки поверх — обычный last-writer-wins.
+ * агентского PUT, юзерские правки поверх — обычный last-writer-wins. dev
+ * всегда однопользовательский: сессии нет ('default').
  *
  * прод: вместо SSE — поллинг версий GET /api/state?since=N раз в ~10с (пауза
  * при document.hidden; бэкофф до 60с при квоте/сбоях Upstash — lib/backoff).
  * Эхо закрыто по версиям: свой POST /api/sync запоминает присвоенную сервером
  * версию и поллинг её не возвращает (unchanged), чужую версию применяем и не
  * отсылаем обратно (identity-чек, как в dev); потерянный ответ синка страховён
- * контент-сверкой в applyForeign. Полный контракт — API.md «Прод (Vercel)».
+ * контент-сверкой в applyForeign. Мульти-сессии: все вызовы несут
+ * X-Lab-Session (транспорт читает sessionStorage на каждом запросе); смена
+ * сессии (session-проп) перезапускает эффект — версии/эхо-строки сбрасываются,
+ * поллинг новой сессии стартует немедленно (вид не трогаем). Полный контракт —
+ * API.md «Прод (Vercel)» и «Сессии».
  */
-function useAgentSync(hashLoadedRef: RefObject<boolean>) {
+function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
     const replace = useLabStore((s) => s.replace);
     const setDevApiAvailable = useLabStore((s) => s.setDevApiAvailable);
     const setAnalysisTarget = useLabStore((s) => s.setAnalysisTarget);
@@ -329,7 +336,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
             window.clearTimeout(timer);
             es?.close();
         };
-    }, [replace, setDevApiAvailable, setAnalysisTarget, hashLoadedRef]);
+    }, [replace, setDevApiAvailable, setAnalysisTarget, hashLoadedRef, session]);
 }
 
 /** Изменённые пути dot-notation: глубина ≤ 3 сегментов, значения не собираем. */
@@ -905,13 +912,17 @@ export default function App() {
     const [codeOpen, setCodeOpen] = useState(false);
     const [presetsOpen, setPresetsOpen] = useState(false);
     const [shareNote, setShareNote] = useState('');
+    // сессия прода (sessionStorage + ?join при загрузке): селектор хедера меняет
+    // её на лету — useAgentSync перезапускается с чистыми версиями. В dev всегда
+    // 'default' (селектор не монтируется).
+    const [session, setSessionState] = useState(currentSession);
     const shareTimer = useRef<number | null>(null);
     const canUndo = useLabStore((s) => s.past.length > 0);
     // флаг «стейт загружен из share-ссылки»: sync-хук по нему пропускает
     // первое SSE-событие (initial-кэш), чтобы не затирать стейт из ссылки
     const hashLoadedRef = useRef(false);
     usePasteImage();
-    useAgentSync(hashLoadedRef);
+    useAgentSync(hashLoadedRef, session);
     useJournalSync();
     useAnalysisSync();
     useSweepSync();
@@ -951,6 +962,19 @@ export default function App() {
                     песочница градиентов и масок
                 </span>
                 <div className="ml-auto flex items-center gap-2">
+                    {!import.meta.env.DEV && (
+                        <HeaderSession
+                            session={session}
+                            onSwitch={(id) => {
+                                setSession(id);
+                                setSessionState(id);
+                                // hash-скип одноразовый: стейт из #s= НЕ должен
+                                // глотать первый полл новой сессии (иначе под
+                                // шильдиком новой сессии остаётся доска старой)
+                                hashLoadedRef.current = false;
+                            }}
+                        />
+                    )}
                     {shareNote !== '' && (
                         <span className="text-[10px] whitespace-nowrap text-lab-muted">
                             {shareNote}

@@ -3,6 +3,7 @@ import { canonicalTargetKey, KNOWN_TARGET_KEYS } from '../../shared/targetKeys.t
 import {
     clearAnalysisReq,
     configured,
+    ensureSession,
     kvDelete,
     kvReadJson,
     kvWriteJson,
@@ -10,7 +11,7 @@ import {
     notConfigured,
     setAnalysisReq,
 } from '../kv.ts';
-import { json, readJsonBody, requireMutationAuth, route } from '../rest.ts';
+import { json, readJsonBody, requireMutationAuth, route, sessionFromRequest } from '../rest.ts';
 
 /** Кэш анализа: полный Analysis или маркер — у обоих есть поле target. */
 interface StoredAnalysis {
@@ -19,19 +20,22 @@ interface StoredAnalysis {
 }
 
 /**
- * GET /api/analysis(?target=<key>) — последний diff-анализ. Без ?target —
- * последний посчитанный. С ?target: кэш валиден только при совпадении target;
- * на промахе заявка пишется в analysisReq того же ключа lab:state (браузер
- * забирает её поллингом GET /api/state?since и пересчитывает, POST стирает) —
- * агент повторяет GET раз в ~5 с, пока не придёт ответ с этим target (в dev то
- * же делал SSE). Промах — это запись, поэтому при заданном LAB_API_TOKEN он
+ * GET /api/analysis(?target=<key>) — последний diff-анализ сессии
+ * (X-Lab-Session; несуществующая создаётся лениво). Без ?target — последний
+ * посчитанный. С ?target: кэш валиден только при совпадении target; на промахе
+ * заявка пишется в analysisReq того же слота lab:s/<id> (браузер забирает её
+ * поллингом GET /api/state?since и пересчитывает, POST стирает) — агент
+ * повторяет GET раз в ~5 с, пока не придёт ответ с этим target (в dev то же
+ * делал SSE). Промах — это запись, поэтому при заданном LAB_API_TOKEN он
  * требует Bearer, как остальные агентские мутации (анти-спам заявок).
  */
 export async function GET(req: Request): Promise<Response> {
     return route(async () => {
         if (!configured()) return notConfigured();
+        const sessionId = sessionFromRequest(req);
+        await ensureSession(sessionId);
         const targetParam = new URL(req.url).searchParams.get('target');
-        const stored = await kvReadJson<StoredAnalysis>(K.analysis);
+        const stored = await kvReadJson<StoredAnalysis>(K.analysis(sessionId));
 
         if (targetParam === null) {
             if (stored === null) {
@@ -54,9 +58,9 @@ export async function GET(req: Request): Promise<Response> {
         }
         requireMutationAuth(req);
         // заявка — только через хелпер: inline-запись стирала бы чужую sweep-заявку
-        await setAnalysisReq(key);
+        await setAnalysisReq(sessionId, key);
         return json(404, {
-            error: `анализ для target=${key} запрошен у приложения (заявка analysisReq в lab:state, браузер подхватит поллингом ≤10 с); повторите GET через ~5 с, пока ответ не придёт с этим target`,
+            error: `анализ для target=${key} запрошен у приложения (заявка analysisReq в lab:s/${sessionId}, браузер подхватит поллингом ≤10 с); повторите GET через ~5 с, пока ответ не придёт с этим target`,
             requested: key,
         });
     });
@@ -64,26 +68,28 @@ export async function GET(req: Request): Promise<Response> {
 
 /**
  * POST /api/analysis (прод-аналог dev POST /api/__analysis) — браузер шлёт
- * diff-анализ/маркер (debounce ~500ms). {"cleared":true} — референс убрали:
- * кэш сбрасываем, старьё не отдаём (заявку не трогаем — если агент ждёт
- * таргет, она разрулится маркером blocked:'no-reference').
+ * diff-анализ/маркер (debounce ~500ms) в слот своей сессии. {"cleared":true} —
+ * референс убрали: кэш сбрасываем, старьё не отдаём (заявку не трогаем — если
+ * агент ждёт таргет, она разрулится маркером blocked:'no-reference').
  */
 export async function POST(req: Request): Promise<Response> {
     return route(async () => {
         if (!configured()) return notConfigured();
         requireMutationAuth(req);
+        const sessionId = sessionFromRequest(req);
+        await ensureSession(sessionId);
         const parsed = AnalysisPostSchema.safeParse(await readJsonBody(req));
         if (!parsed.success) {
             return json(400, { error: 'invalid Analysis payload', issues: parsed.error.issues });
         }
         if ('cleared' in parsed.data) {
-            await kvDelete(K.analysis);
+            await kvDelete(K.analysis(sessionId));
             return json(200, { ok: true });
         }
-        await kvWriteJson(K.analysis, parsed.data);
+        await kvWriteJson(K.analysis(sessionId), parsed.data);
         // свежий анализ (или маркер) закрывает заявку: стираем analysisReq;
         // заявку sweep не трогаем — она ждёт исполнения приложения
-        await clearAnalysisReq();
+        await clearAnalysisReq(sessionId);
         return json(200, { ok: true });
     });
 }

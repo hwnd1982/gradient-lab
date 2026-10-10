@@ -1,15 +1,16 @@
 import type { JournalEntry } from '../../src/schema.ts';
 import { JournalPostSchema } from '../../src/schema.ts';
 import { K, configured, kvDelete, kvReadJson, kvWriteJson, notConfigured } from '../kv.ts';
-import { json, readJsonBody, requireMutationAuth, route } from '../rest.ts';
+import { json, readJsonBody, requireMutationAuth, route, sessionFromRequest } from '../rest.ts';
 
 /** Вместимость журнала (как кольцевой буфер dev-сервера). */
 const JOURNAL_LIMIT = 200;
 
-/** GET /api/journal — журнал итераций (читать, чтобы откатиться к удачной). */
-export async function GET(): Promise<Response> {
+/** GET /api/journal — журнал итераций (общая лента всех сессий: заголовок X-Lab-Session валидируется, но на данные не влияет). */
+export async function GET(req: Request): Promise<Response> {
     return route(async () => {
         if (!configured()) return notConfigured();
+        sessionFromRequest(req);
         const entries = await kvReadJson<JournalEntry[]>(K.journal);
         return json(200, { entries: entries ?? [] });
     });

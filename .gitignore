@@ -12,8 +12,6 @@ dist
 dist-ssr
 *.local
 
-# генерируемые бандлы прод-функций (scripts/build-functions.mjs из server/functions)
-
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

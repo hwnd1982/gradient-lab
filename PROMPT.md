@@ -132,6 +132,10 @@ rem = pxcss/remBase; %макета = pxcss/designWidth·100. Отдай юзер
 • если цель — прод-инстанс на Vercel, цикл тот же (поллинг вместо SSE):
   base URL https://<project>.vercel.app, live-отклик PUT ≤10с, analysis?target
   полли раз в ~5с, sweep-статус (GET /api/sweep?id=) — раз в ~3с;
+• прод — мульти-сессии: работай в СВОЕЙ доске — заголовок X-Lab-Session: <id>
+  ([a-zA-Z0-9_-], до 64) на КАЖДОМ запросе; список живых — GET /api/sessions,
+  в чужую не пиши; юзеру кидай https://<project>.vercel.app/?join=<id> (его
+  вкладка откроется в твоей сессии);
 • перед каждым PUT — свежий GET; PUT только полный валидный стейт, не чаще ~5/сек;
 • во время sweep (status pending) НЕ ДЕЛАЙ PUT и не правь UI — юзерский ввод
   = abort, исходный радиус не восстанавливается; GET /api/state в это время

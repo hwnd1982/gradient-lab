@@ -54,7 +54,8 @@ process.env.KV_REST_API_URL = KV_URL;
 process.env.KV_REST_API_TOKEN = 'test-token';
 delete process.env.LAB_API_TOKEN;
 
-const labState = () => JSON.parse(kv.get('lab:state'));
+// стейт сессии default (X-Lab-Session не задан → 'default'; слот lab:s/default)
+const labState = (s = 'default') => JSON.parse(kv.get(`lab:s/${s}`));
 const labVersion = () => labState().version;
 
 // ── импорт хендлеров (после подмены fetch: kv.ts замыкает globalThis.fetch при вызове) ──
@@ -68,6 +69,8 @@ const presetApi = await jiti.import(`${ROOT}server/functions/presets-name.ts`);
 const sweepApi = await jiti.import(`${ROOT}server/functions/sweep.ts`);
 const sweepIdApi = await jiti.import(`${ROOT}server/functions/sweep-id.ts`);
 const methodologyApi = await jiti.import(`${ROOT}server/functions/methodology.ts`);
+const sessionsApi = await jiti.import(`${ROOT}server/functions/sessions.ts`);
+const sessionsIdApi = await jiti.import(`${ROOT}server/functions/sessions-id.ts`);
 const { METHODOLOGY } = await jiti.import(`${ROOT}src/lib/methodology.ts`);
 const { MethodologySchema, AnalysisSchema, defaultBlockState } = await jiti.import(
     `${ROOT}src/schema.ts`
@@ -161,13 +164,13 @@ const state = defaultBlockState();
 
 // ── warnings: 404-cleared до синка, запись, cleared-семантика ──
 {
-    const g0 = await body(await warningsApi.GET());
+    const g0 = await body(await warningsApi.GET(req('GET', 'https://x/api/warnings')));
     check('warnings: до POST — 404 {cleared:true}', g0.status === 404 && g0.json.cleared === true);
     const warn = {
         warnings: [{ code: 'blur-zero-radius', severity: 'warn', message: 'радиус 0' }],
     };
     await warningsApi.POST(req('POST', 'https://x/api/warnings', warn));
-    const g1 = await body(await warningsApi.GET());
+    const g1 = await body(await warningsApi.GET(req('GET', 'https://x/api/warnings')));
     check(
         'warnings: GET отдаёт список',
         g1.status === 200 &&
@@ -175,7 +178,7 @@ const state = defaultBlockState();
             g1.json.warnings[0].code === 'blur-zero-radius'
     );
     await warningsApi.POST(req('POST', 'https://x/api/warnings', { cleared: true }));
-    const g2 = await body(await warningsApi.GET());
+    const g2 = await body(await warningsApi.GET(req('GET', 'https://x/api/warnings')));
     check(
         'warnings: cleared:true хранится как пусто (не отдаёт старьё)',
         g2.status === 200 && g2.json.cleared === true
@@ -296,8 +299,8 @@ const analysis = AnalysisSchema.parse({
     const id = sw.json.id ?? '';
     check('sweep POST: 200 {id}', sw.status === 200 && typeof id === 'string' && id !== '');
     check(
-        'sweep POST: lab:sweep:<id> = {req, pending}',
-        JSON.parse(kv.get(`lab:sweep:${id}`)).status === 'pending'
+        'sweep POST: lab:s/default/sweep/<id> = {req, pending}',
+        JSON.parse(kv.get(`lab:s/default/sweep/${id}`)).status === 'pending'
     );
     check(
         'sweep POST: заявка sweepReq в lab:state, analysisReq сохранён',
@@ -316,12 +319,13 @@ const analysis = AnalysisSchema.parse({
             labState().sweepReq?.id === id
     );
 
-    // идемпотентность повторного промаха: get анализа + get стейта, без set
+    // идемпотентность повторного промаха: get слота + get анализа + get слота
+    // (setAnalysisReq), без set
     const before = fetchCount;
     await analysisApi.GET(req('GET', 'https://x/api/analysis?target=underlay'));
     check(
-        'промах идемпотентен: 2 команды (get+get), без set',
-        fetchCount - before === 2,
+        'промах идемпотентен: 3 команды (get+get+get), без set',
+        fetchCount - before === 3,
         `команд: ${fetchCount - before}`
     );
 
@@ -467,9 +471,9 @@ const analysis = AnalysisSchema.parse({
     );
 }
 
-// ── journal: id/after/404/cap 200/DELETE ──
+// ── journal: id/after/404/cap 200/DELETE (общая лента: заголовок валидируется, слотов не касается) ──
 {
-    const g0 = await body(await journalApi.GET());
+    const g0 = await body(await journalApi.GET(req('GET', 'https://x/api/journal')));
     check('journal: пусто → {entries:[]}', g0.status === 200 && g0.json.entries.length === 0);
 
     const j1 = await body(
@@ -498,7 +502,8 @@ const analysis = AnalysisSchema.parse({
         )
     );
     check('journal finish: 200', fin.status === 200);
-    const entries = (await body(await journalApi.GET())).json.entries;
+    const entries = (await body(await journalApi.GET(req('GET', 'https://x/api/journal')))).json
+        .entries;
     check(
         'journal: after дозаполнен, before сохранён',
         entries[0].after.zoneMatch === 98.4 && entries[0].before.zoneMatch === 95
@@ -528,14 +533,16 @@ const analysis = AnalysisSchema.parse({
             req('POST', 'https://x/api/journal', { ts: 3 + i, fields: ['blur.radius'] })
         );
     }
-    const capped = (await body(await journalApi.GET())).json.entries;
+    const capped = (await body(await journalApi.GET(req('GET', 'https://x/api/journal')))).json
+        .entries;
     check('journal: cap 200 (205 записей → 200)', capped.length === 200);
 
     const del = await body(await journalApi.DELETE(req('DELETE', 'https://x/api/journal')));
     check('journal DELETE: {cleared:200}', del.status === 200 && del.json.cleared === 200);
     check(
         'journal: после DELETE пусто',
-        (await body(await journalApi.GET())).json.entries.length === 0
+        (await body(await journalApi.GET(req('GET', 'https://x/api/journal')))).json.entries
+            .length === 0
     );
     const j3 = await body(
         await journalApi.POST(
@@ -621,4 +628,261 @@ const analysis = AnalysisSchema.parse({
     const openRead = await body(await stateApi.GET(req('GET', 'https://x/api/state?since=999')));
     check('токен: чтение без токена открыто', openRead.status === 200);
     delete process.env.LAB_API_TOKEN;
+}
+
+// ── сессии: миграция legacy → изоляция → ленивое создание → индекс/CRUD → cap ──
+{
+    const H = (id) => ({ 'X-Lab-Session': id });
+
+    // миграция односессионной эпохи: симулируем legacy-стор (слота default нет)
+    kv.delete('lab:s/default');
+    kv.delete('lab:s/default/ver');
+    kv.delete('lab:s/default/warnings');
+    kv.delete('lab:s/default/analysis');
+    kv.delete('lab:sessions');
+    kv.set(
+        'lab:state',
+        JSON.stringify({
+            version: 42,
+            state: { ...state, w: 777 },
+            analysisReq: 'blurMask',
+            sweepReq: { id: 'legacy-sweep', req: { field: 'blur.radius', from: 1, to: 2, steps: 2 } },
+        })
+    );
+    kv.set('lab:statever', '42');
+    kv.set(
+        'lab:warnings',
+        JSON.stringify({
+            warnings: [{ code: 'dup-stops', severity: 'info', message: 'x' }],
+        })
+    );
+    kv.set('lab:analysis', JSON.stringify(analysis));
+    const mg = await body(await stateApi.GET(req('GET', 'https://x/api/state?since=0')));
+    check(
+        'миграция: слот lab:s/default создан из legacy (version/state/заявки/мета)',
+        labState().version === 42 &&
+            labState().state.w === 777 &&
+            labState().analysisReq === 'blurMask' &&
+            labState().sweepReq.id === 'legacy-sweep' &&
+            labState().name === 'default'
+    );
+    check(
+        'миграция: GET отдал legacy-стейт + заявки',
+        mg.json.version === 42 && mg.json.state.w === 777 && mg.json.sweepRequest?.id === 'legacy-sweep'
+    );
+    check('миграция: счётчик продолжается с 42', kv.get('lab:s/default/ver') === '42');
+    check(
+        'миграция: warnings/analysis переехали в слот',
+        JSON.parse(kv.get('lab:s/default/warnings')).warnings[0].code === 'dup-stops' &&
+            JSON.parse(kv.get('lab:s/default/analysis')).target === 'blurMask'
+    );
+    check(
+        'миграция: legacy-ключи удалены',
+        !kv.has('lab:state') && !kv.has('lab:statever') && !kv.has('lab:warnings') && !kv.has('lab:analysis')
+    );
+    const pm = await body(await stateApi.PUT(req('PUT', 'https://x/api/state', state)));
+    check('миграция: следующая версия 43 (счётчик перенесён)', pm.json.version === 43);
+
+    // изоляция двух сессий + независимые счётчики версий
+    const sa = { ...state, w: 111 };
+    const sb = { ...state, w: 222 };
+    const pa = await body(await stateApi.PUT(req('PUT', 'https://x/api/state', sa, H('alpha'))));
+    const pb1 = await body(await stateApi.PUT(req('PUT', 'https://x/api/state', sb, H('beta'))));
+    check(
+        'сессии: обе версии начинаются с 1 (счётчики независимы)',
+        pa.json.version === 1 && pb1.json.version === 1
+    );
+    const pb2 = await body(await stateApi.PUT(req('PUT', 'https://x/api/state', sb, H('beta'))));
+    check('сессии: beta растёт (2), alpha нет (1)', pb2.json.version === 2 && labState('alpha').version === 1);
+    const ga = await body(
+        await stateApi.GET(req('GET', 'https://x/api/state', undefined, H('alpha')))
+    );
+    const gb = await body(
+        await stateApi.GET(req('GET', 'https://x/api/state', undefined, H('beta')))
+    );
+    check('сессии: изоляция стейтов', ga.json.w === 111 && gb.json.w === 222);
+    check('сессии: default не затронут (777→посл. PUT state)', labState().state.w !== 111 && labState().state.w !== 222);
+
+    // warnings/analysis — в слоте сессии
+    await warningsApi.POST(
+        req(
+            'POST',
+            'https://x/api/warnings',
+            { warnings: [{ code: 'blur-zero-radius', severity: 'warn', message: 'радиус 0' }] },
+            H('alpha')
+        )
+    );
+    const wa = await body(
+        await warningsApi.GET(req('GET', 'https://x/api/warnings', undefined, H('alpha')))
+    );
+    const wb = await body(
+        await warningsApi.GET(req('GET', 'https://x/api/warnings', undefined, H('beta')))
+    );
+    check(
+        'сессии: warnings alpha виден, beta — 404 cleared',
+        wa.status === 200 && wb.status === 404 && wb.json.cleared === true
+    );
+    check('сессии: ключ warnings в слоте alpha', kv.has('lab:s/alpha/warnings'));
+    await analysisApi.POST(req('POST', 'https://x/api/analysis', analysis, H('alpha')));
+    const ab = await body(
+        await analysisApi.GET(req('GET', 'https://x/api/analysis', undefined, H('beta')))
+    );
+    check('сессии: анализ beta не видит alpha', ab.status === 404);
+
+    // sweep — в слоте сессии: чужой по id не читается
+    const sw = await body(
+        await sweepApi.POST(
+            req('POST', 'https://x/api/sweep', { field: 'blur.radius', from: 4, to: 8, steps: 2 }, H('alpha'))
+        )
+    );
+    const sid = sw.json.id;
+    check('сессии: sweep-ключ в слоте alpha', kv.has(`lab:s/alpha/sweep/${sid}`));
+    const fromBeta = await body(
+        await sweepApi.GET(req('GET', `https://x/api/sweep?id=${sid}`, undefined, H('beta')))
+    );
+    const fromBetaPath = await body(
+        await sweepIdApi.GET(req('GET', `https://x/api/sweep/${sid}`, undefined, H('beta')), {
+            params: Promise.resolve({ id: sid }),
+        })
+    );
+    check(
+        'сессии: чужой sweep не читается (?id= и /<id>) — 404',
+        fromBeta.status === 404 && fromBetaPath.status === 404
+    );
+    const fromAlpha = await body(
+        await sweepApi.GET(req('GET', `https://x/api/sweep?id=${sid}`, undefined, H('alpha')))
+    );
+    check('сессии: свой sweep читается', fromAlpha.status === 200 && fromAlpha.json.status === 'pending');
+
+    // ленивое создание несуществующей сессии (включая GET)
+    check('сессии: до обращения слота ghost нет', !kv.has('lab:s/ghost'));
+    const gh = await body(
+        await stateApi.GET(req('GET', 'https://x/api/state?since=0', undefined, H('ghost')))
+    );
+    check(
+        'сессии: ленивое создание — пустой слот, unchanged',
+        gh.status === 200 && gh.json.unchanged === true && kv.has('lab:s/ghost')
+    );
+
+    // невалидный id — 400 (и на journal: заголовок валидируется везде)
+    check(
+        'сессии: невалидный id — 400',
+        (await body(await stateApi.GET(req('GET', 'https://x/api/state?since=0', undefined, H('bad id!'))))).status === 400
+    );
+    check(
+        'сессии: id длиннее 64 — 400',
+        (await body(await stateApi.GET(req('GET', 'https://x/api/state?since=0', undefined, H('x'.repeat(65)))))).status === 400
+    );
+    check(
+        'сессии: невалидный id на journal — 400 (валидация глобальна)',
+        (await body(await journalApi.GET(req('GET', 'https://x/api/journal', undefined, H('bad id!'))))).status === 400
+    );
+    // journal — общая лента: под валидным заголовком те же записи (после
+    // DELETE-теста выше в журнале одна запись с id=1 — продолжаем её нумерацию)
+    const jAlpha = await body(
+        await journalApi.POST(req('POST', 'https://x/api/journal', { ts: 5, fields: ['blur.radius'] }, H('alpha')))
+    );
+    check('journal: общий — запись из alpha с id=2', jAlpha.status === 200 && jAlpha.json.id === 2);
+    check(
+        'journal: общий — виден из beta',
+        (await body(await journalApi.GET(req('GET', 'https://x/api/journal', undefined, H('beta'))))).json
+            .entries.length === 2
+    );
+
+    // индекс: список, имя, переименование
+    const list0 = await body(await sessionsApi.GET());
+    check(
+        'сессии: GET /api/sessions отдаёт созданные',
+        list0.status === 200 &&
+            list0.json.sessions.some((e) => e.id === 'alpha') &&
+            list0.json.sessions.some((e) => e.id === 'beta') &&
+            list0.json.sessions.some((e) => e.id === 'ghost')
+    );
+    const ctxId = (id) => ({ params: Promise.resolve({ id }) });
+    const ren = await body(
+        await sessionsIdApi.PUT(
+            req('PUT', 'https://x/api/sessions/alpha', { name: 'Карусель heroes' }),
+            ctxId('alpha')
+        )
+    );
+    check('сессии: PUT rename — 200 {id, name}', ren.status === 200 && ren.json.name === 'Карусель heroes');
+    const list1 = await body(await sessionsApi.GET());
+    check(
+        'сессии: индекс и слот несут имя',
+        list1.json.sessions.find((e) => e.id === 'alpha')?.name === 'Карусель heroes' &&
+            labState('alpha').name === 'Карусель heroes'
+    );
+    const badPut = await body(
+        await sessionsIdApi.PUT(
+            req('PUT', 'https://x/api/sessions/ok-id', { name: '' }),
+            ctxId('ok-id')
+        )
+    );
+    check('сессии: PUT пустое имя — 400', badPut.status === 400);
+    const badId = await body(
+        await sessionsIdApi.PUT(req('PUT', 'https://x/api/sessions/%zz', { name: 'x' }), {
+            params: Promise.resolve({ id: '%zz' }),
+        })
+    );
+    check('сессии: PUT невалидный id — 400', badId.status === 400);
+
+    // DELETE: слот целиком, повтор — 404, индекс чистеет
+    const del = await body(
+        await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions/alpha'), ctxId('alpha'))
+    );
+    check('сессии: DELETE — 200 {ok, id}', del.status === 200 && del.json.ok === true && del.json.id === 'alpha');
+    check(
+        'сессии: слот удалён целиком (стейт/ver/warnings/analysis/sweep)',
+        !kv.has('lab:s/alpha') &&
+            !kv.has('lab:s/alpha/ver') &&
+            !kv.has('lab:s/alpha/warnings') &&
+            !kv.has('lab:s/alpha/analysis')
+    );
+    check(
+        'сессии: повторный DELETE — 404',
+        (await body(await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions/alpha'), ctxId('alpha')))).status === 404
+    );
+    const list2 = await body(await sessionsApi.GET());
+    check('сессии: индекс после DELETE без alpha', !list2.json.sessions.some((e) => e.id === 'alpha'));
+
+    // авторизация мутаций сессий
+    process.env.LAB_API_TOKEN = 'secret';
+    check(
+        'сессии: PUT без токена — 401',
+        (await body(await sessionsIdApi.PUT(req('PUT', 'https://x/api/sessions/x1', { name: 'x' }), ctxId('x1')))).status === 401
+    );
+    check(
+        'сессии: DELETE без токена — 401',
+        (await body(await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions/x1'), ctxId('x1')))).status === 401
+    );
+    const okRen = await body(
+        await sessionsIdApi.PUT(
+            req('PUT', 'https://x/api/sessions/x1', { name: 'x' }, { Authorization: 'Bearer secret' }),
+            ctxId('x1')
+        )
+    );
+    check('сессии: PUT с токеном — 200', okRen.status === 200);
+    delete process.env.LAB_API_TOKEN;
+
+    // cap 50: 52 новых сессий → индекс 50, выкинуты самые старые
+    for (let i = 0; i < 52; i++) {
+        await stateApi.PUT(req('PUT', 'https://x/api/state', state, H(`cap-${i}`)));
+    }
+    const capList = await body(await sessionsApi.GET());
+    check('сессии: индекс cap 50', capList.json.sessions.length === 50, `len=${capList.json.sessions.length}`);
+    check(
+        'сессии: выкинуты самые старые (beta/ghost), свежие на месте',
+        !capList.json.sessions.some((e) => e.id === 'beta') &&
+            !capList.json.sessions.some((e) => e.id === 'ghost') &&
+            capList.json.sessions.some((e) => e.id === 'cap-51')
+    );
+    // evicted-слот жив (ключи не удалялись) и пересоздаёт строку при записи
+    await stateApi.PUT(req('PUT', 'https://x/api/state', state, H('beta')));
+    const listBeta = await body(await sessionsApi.GET());
+    check(
+        'сессии: evicted beta вернулась в индекс записью (cap держится)',
+        listBeta.json.sessions.some((e) => e.id === 'beta') &&
+            listBeta.json.sessions.length === 50 &&
+            !listBeta.json.sessions.some((e) => e.id === 'cap-2')
+    );
 }

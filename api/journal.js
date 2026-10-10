@@ -5999,6 +5999,21 @@ async function readJsonBody(req) {
 		throw new HttpError(400, { error: "тело запроса не является JSON" });
 	}
 }
+/** Дефолтная сессия прода: заголовок X-Lab-Session не задан/пуст (см. API.md «Сессии»). */
+const DEFAULT_SESSION = "default";
+/** Допустимый id сессии: [a-zA-Z0-9_-], 1..64 символа. */
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+/**
+* Сессия из заголовка X-Lab-Session (прод): без заголовка — 'default',
+* невалидный id — 400. Клиент шлёт его из sessionStorage, агент — выбирает
+* свой слот доски (мульти-сессионность, см. API.md «Сессии»).
+*/
+function sessionFromRequest(req) {
+	const raw = req.headers.get("x-lab-session");
+	const id = raw === null || raw === "" ? DEFAULT_SESSION : raw;
+	if (!SESSION_ID_RE.test(id)) throw new HttpError(400, { error: `невалидный X-Lab-Session «${id}»: допустимы [a-zA-Z0-9_-], 1..64 символа` });
+	return id;
+}
 /**
 * Мутации можно закрыть токеном: env LAB_API_TOKEN (сервер) + VITE_LAB_TOKEN
 * (клиент, тот же токен). Не задан — авторизация выключена. Нет заголовка —
@@ -6022,20 +6037,27 @@ function requireMutationAuth(req) {
 * в теле (документированный путь Upstash для больших значений: стейты с
 * dataURL-картинками бывают на мегабайты, URL-путь их не вместит).
 */
-/** Ключи (см. API.md «Прод (Vercel) → ключи Upstash»). */
+/** Ключи (см. API.md «Прод (Vercel)» и «Сессии»). */
 const K = {
-	/** {version, state, analysisReq?, sweepReq?} — одним ключом: полл-тик = 1 команда */
-	state: "lab:state",
-	/** счётчик версий стейта (INCR при каждой записи) */
-	statever: "lab:statever",
-	warnings: "lab:warnings",
-	analysis: "lab:analysis",
+	legacyState: "lab:state",
+	legacyStatever: "lab:statever",
+	legacyWarnings: "lab:warnings",
+	legacyAnalysis: "lab:analysis",
+	/** индекс сессий [{id, name, updatedAt}], cap SESSIONS_LIMIT */
+	sessions: "lab:sessions",
+	/** журнал итераций — ОБЩИЙ для всех сессий (общая лента подбора) */
 	journal: "lab:journal",
-	/** индекс имён пресетов (JSON-массив) */
+	/** индекс имён пресетов (JSON-массив) — пресеты глобальны */
 	presetIndex: "lab:presets",
 	preset: (name) => `lab:preset:${name}`,
-	/** результат sweep по id (TTL не нужен — перетирается следующим заходом) */
-	sweep: (id) => `lab:sweep:${id}`
+	/** {version, state, analysisReq?, sweepReq?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
+	state: (id) => `lab:s/${id}`,
+	/** счётчик версий стейта слота (INCR при каждой записи) */
+	statever: (id) => `lab:s/${id}/ver`,
+	warnings: (id) => `lab:s/${id}/warnings`,
+	analysis: (id) => `lab:s/${id}/analysis`,
+	/** результат sweep по id (TTL не нужен — перетирается следующим заходом); id сессии в ключе, чтобы чужой sweep не читался */
+	sweep: (id, sweepId) => `lab:s/${id}/sweep/${sweepId}`
 };
 const NOT_CONFIGURED_ERROR = { error: "prod API не настроен: добавь Upstash-интеграцию (KV_REST_API_URL/KV_REST_API_TOKEN)" };
 /** env от Upstash-интеграции Vercel; null — интеграция не подключена. */
@@ -6107,10 +6129,11 @@ async function kvDelete(key) {
 //#region server/functions/journal.ts
 /** Вместимость журнала (как кольцевой буфер dev-сервера). */
 const JOURNAL_LIMIT = 200;
-/** GET /api/journal — журнал итераций (читать, чтобы откатиться к удачной). */
-async function GET() {
+/** GET /api/journal — журнал итераций (общая лента всех сессий: заголовок X-Lab-Session валидируется, но на данные не влияет). */
+async function GET(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
+		sessionFromRequest(req);
 		return json(200, { entries: await kvReadJson(K.journal) ?? [] });
 	});
 }

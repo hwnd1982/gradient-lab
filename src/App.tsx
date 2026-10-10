@@ -82,6 +82,7 @@ function usePasteImage() {
 function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
     const replace = useLabStore((s) => s.replace);
     const setDevApiAvailable = useLabStore((s) => s.setDevApiAvailable);
+    const setAgentNote = useLabStore((s) => s.setAgentNote);
     const setAnalysisTarget = useLabStore((s) => s.setAnalysisTarget);
     // ссылка последнего применённого с сервера стейта: identity-сравнение в подписке
     const justAppliedRef = useRef<BlockState | null>(null);
@@ -140,7 +141,18 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                 // ссылка применяемого объекта: подписка по ней не шлёт /api/sync
                 justAppliedRef.current = parsed.data;
                 lastKnownVersion = version;
+                const prevState = useLabStore.getState().state;
                 replace(parsed.data, { undoable: false });
+                // индикация агентской активности: что именно поменялось
+                const paths: string[] = [];
+                diffPaths(prevState, parsed.data, '', 0, paths);
+                if (paths.length > 0) {
+                    const head = paths.slice(0, 3).join(', ');
+                    const more = paths.length > 3 ? ` +${paths.length - 3}` : '';
+                    setAgentNote(`Агент обновил: ${head}${more}`);
+                    window.clearTimeout(noteTimer);
+                    noteTimer = window.setTimeout(() => setAgentNote(null), 3500);
+                }
             };
 
             const arm = (): void => {
@@ -246,6 +258,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             }, 300);
         });
 
+        let noteTimer: number | undefined;
         let es: EventSource | null = null;
         // стейт из share-ссылки уже применён — первое SSE-событие после
         // подключения (initial-кэш сервера) не должно его затирать;
@@ -334,6 +347,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             cancelled = true;
             unsubscribe();
             window.clearTimeout(timer);
+            window.clearTimeout(noteTimer);
             es?.close();
         };
     }, [replace, setDevApiAvailable, setAnalysisTarget, hashLoadedRef, session]);
@@ -918,6 +932,7 @@ export default function App() {
     const [session, setSessionState] = useState(currentSession);
     const shareTimer = useRef<number | null>(null);
     const canUndo = useLabStore((s) => s.past.length > 0);
+    const agentNote = useLabStore((s) => s.agentNote);
     // флаг «стейт загружен из share-ссылки»: sync-хук по нему пропускает
     // первое SSE-событие (initial-кэш), чтобы не затирать стейт из ссылки
     const hashLoadedRef = useRef(false);
@@ -1032,6 +1047,11 @@ export default function App() {
                     </button>
                 </div>
             </header>
+            {agentNote !== null && (
+                <div className="pointer-events-none fixed bottom-10 left-1/2 z-[70] -translate-x-1/2 rounded-md border border-lab-accent/60 bg-lab-panel/95 px-3 py-1.5 text-xs shadow-lg">
+                    {agentNote}
+                </div>
+            )}
             <div className="relative flex min-h-0 min-w-0 flex-1">
                 <Stage />
                 <Inspector />

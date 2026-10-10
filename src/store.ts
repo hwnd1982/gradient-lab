@@ -115,6 +115,8 @@ interface LabStore {
     animPlaying: boolean;
     /** доступен ли dev Agent API (только в dev, после успешного probe) */
     devApiAvailable: boolean;
+    /** тост «агент обновил стейт» (UI, не сериализуется); null — скрыт */
+    agentNote: string | null;
     /** последний diff-анализ против референса (не сериализуется; null — референса нет) */
     analysis: Analysis | null;
     /** heat-карта последнего анализа для оверлея режима «Анализ» */
@@ -201,6 +203,7 @@ interface LabStore {
     zoomFit(): void;
     setAnimPlaying(v: boolean): void;
     setDevApiAvailable(v: boolean): void;
+    setAgentNote(note: string | null): void;
     getGradient(target: GradientTarget): Gradient | null;
 }
 
@@ -226,6 +229,7 @@ export const useLabStore = create<LabStore>()((set, get) => {
         compareUI: { visible: true, dragRef: false, eyedropper: false, pick: null },
         animPlaying: false,
         devApiAvailable: false,
+        agentNote: null,
         analysis: null,
         analysisDiff: null,
         analysisMarker: null,
@@ -365,6 +369,7 @@ export const useLabStore = create<LabStore>()((set, get) => {
         setAnalysisProfile: (v) => set({ analysisProfile: v }),
         setAnimPlaying: (v) => set({ animPlaying: v }),
         setDevApiAvailable: (v) => set({ devApiAvailable: v }),
+        setAgentNote: (note) => set({ agentNote: note }),
         setCompareUI: (patch) =>
             set((s) => {
                 const next = { ...s.compareUI, ...patch };

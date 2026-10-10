@@ -47,7 +47,7 @@ export async function GET(req: Request): Promise<Response> {
     return route(async () => {
         if (!configured()) return notConfigured();
         const sessionId = sessionFromRequest(req);
-        const id = new URL(req.url).searchParams.get('id');
+        const id = new URL(req.url, 'http://localhost').searchParams.get('id');
         if (id === null) {
             throw new HttpError(400, { error: 'укажите ?id=<sweep id из POST /api/sweep>' });
         }

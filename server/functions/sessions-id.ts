@@ -11,7 +11,7 @@ import {
 
 /** id из пути /api/sessions/<id> (catch-all роутер). */
 function sessionIdFromUrl(req: Request): string {
-    const segments = new URL(req.url).pathname.replace(/^\/+|\/+$/g, '').split('/');
+    const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
     return segments[2] ?? '';
 }
 

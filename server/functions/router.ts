@@ -24,7 +24,7 @@ const MISMATCH = (method: string): Response =>
     json(405, { error: `метод ${method} не поддерживается` });
 
 export default async function handler(req: Request): Promise<Response> {
-    const segments = new URL(req.url).pathname.replace(/^\/+|\/+$/g, '').split('/');
+    const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
     const resource = segments[1] ?? '';
     const hasParam = segments.length > 2;
     const m = req.method;

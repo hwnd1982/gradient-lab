@@ -5,7 +5,7 @@ import { HttpError, json, route, sessionFromRequest, SWEEP_ID_RE } from '../rest
 
 /** id из пути /api/sweep/<id> (catch-all роутер; Node-функции без ctx.params). */
 function sweepIdFromUrl(req: Request): string {
-    const segments = new URL(req.url).pathname.replace(/^\/+|\/+$/g, '').split('/');
+    const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
     return segments[2] ?? '';
 }
 

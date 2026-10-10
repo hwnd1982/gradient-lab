@@ -10,7 +10,7 @@ import { sanitizeName } from '../../shared/targetKeys.ts';
 
 /** Имя пресета из пути /api/presets/<name> (сегмент после /presets/). */
 function presetNameFromUrl(req: Request): string {
-    const segments = new URL(req.url).pathname.replace(/^\/+|\/+$/g, '').split('/');
+    const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
     return segments[2] ?? '';
 }
 

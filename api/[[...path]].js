@@ -6682,7 +6682,7 @@ async function GET$11(req) {
 		if (!configured()) return notConfigured();
 		const sessionId = sessionFromRequest(req);
 		await ensureSession(sessionId);
-		const targetParam = new URL(req.url).searchParams.get("target");
+		const targetParam = new URL(req.url, "http://localhost").searchParams.get("target");
 		const stored = await kvReadJson(K.analysis(sessionId));
 		if (targetParam === null) {
 			if (stored === null) return json(404, { error: "анализа ещё нет: загрузите референс в браузере (секция «Сравнение с макетом») — приложение пришлёт POST /api/analysis" });
@@ -6959,7 +6959,7 @@ async function GET$7() {
 //#region server/functions/presets-name.ts
 /** Имя пресета из пути /api/presets/<name> (сегмент после /presets/). */
 function presetNameFromUrl(req) {
-	return new URL(req.url).pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+	return new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
 }
 /** GET /api/presets/:name — один пресет (санитизация имени как в dev). */
 async function GET$6(req) {
@@ -7046,7 +7046,7 @@ async function GET$4() {
 //#region server/functions/sessions-id.ts
 /** id из пути /api/sessions/<id> (catch-all роутер). */
 function sessionIdFromUrl(req) {
-	return new URL(req.url).pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+	return new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
 }
 /** id с валидацией; невалидный — HttpError 400 (формат как у X-Lab-Session). */
 async function sessionId(req) {
@@ -7117,7 +7117,7 @@ async function GET$3(req) {
 		const analysisRequest = typeof stored.analysisReq === "string" ? stored.analysisReq : void 0;
 		const reqField = analysisRequest === void 0 ? {} : { analysisRequest };
 		const sweepField = stored.sweepReq === void 0 ? {} : { sweepRequest: stored.sweepReq };
-		const sinceRaw = new URL(req.url).searchParams.get("since");
+		const sinceRaw = new URL(req.url, "http://localhost").searchParams.get("since");
 		if (sinceRaw === null) {
 			if (state === null || version === null) return json(404, { error: "стейт ещё не синкался: откройте приложение в браузере (оно шлёт POST /api/sync) или положите свой через PUT /api/state" });
 			return json(200, state);
@@ -7182,7 +7182,7 @@ async function GET$2(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		const sessionId = sessionFromRequest(req);
-		const id = new URL(req.url).searchParams.get("id");
+		const id = new URL(req.url, "http://localhost").searchParams.get("id");
 		if (id === null) throw new HttpError(400, { error: "укажите ?id=<sweep id из POST /api/sweep>" });
 		if (!SWEEP_ID_RE.test(id)) throw new HttpError(400, { error: "некорректный id" });
 		const stored = await kvReadJson(K.sweep(sessionId, id));
@@ -7233,7 +7233,7 @@ async function POST$2(req) {
 //#region server/functions/sweep-id.ts
 /** id из пути /api/sweep/<id> (catch-all роутер; Node-функции без ctx.params). */
 function sweepIdFromUrl(req) {
-	return new URL(req.url).pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+	return new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
 }
 /**
 * GET /api/sweep/<id> — статус/результат перебора path-параметром (прод).
@@ -7331,7 +7331,7 @@ async function POST(req) {
 */
 const MISMATCH = (method) => json(405, { error: `метод ${method} не поддерживается` });
 async function handler(req) {
-	const segments = new URL(req.url).pathname.replace(/^\/+|\/+$/g, "").split("/");
+	const segments = new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/");
 	const resource = segments[1] ?? "";
 	const hasParam = segments.length > 2;
 	const m = req.method;

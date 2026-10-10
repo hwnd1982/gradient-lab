@@ -34,7 +34,7 @@ export async function GET(req: Request): Promise<Response> {
         if (!configured()) return notConfigured();
         const sessionId = sessionFromRequest(req);
         await ensureSession(sessionId);
-        const targetParam = new URL(req.url).searchParams.get('target');
+        const targetParam = new URL(req.url, 'http://localhost').searchParams.get('target');
         const stored = await kvReadJson<StoredAnalysis>(K.analysis(sessionId));
 
         if (targetParam === null) {

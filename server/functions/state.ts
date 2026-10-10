@@ -24,7 +24,7 @@ export async function GET(req: Request): Promise<Response> {
         const reqField = analysisRequest === undefined ? {} : { analysisRequest };
         const sweepField = stored.sweepReq === undefined ? {} : { sweepRequest: stored.sweepReq };
 
-        const sinceRaw = new URL(req.url).searchParams.get('since');
+        const sinceRaw = new URL(req.url, 'http://localhost').searchParams.get('since');
         if (sinceRaw === null) {
             if (state === null || version === null) {
                 return json(404, {

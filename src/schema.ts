@@ -109,7 +109,7 @@ export const BaseSpecSchema = z.object({
      */
     gradient: GradientSchema.default(() =>
         defaultLinearGradient(90, [
-            { id: uid(), pos: 0, color: '#101010', alpha: 1 },
+            { id: uid(), pos: 0, color: '#101010', alpha: 0 },
             { id: uid(), pos: 100, color: '#101010', alpha: 0 },
         ])
     ),

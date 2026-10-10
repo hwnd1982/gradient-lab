@@ -5829,7 +5829,7 @@ const BaseSpecSchema = object({
 		id: uid(),
 		pos: 0,
 		color: "#101010",
-		alpha: 1
+		alpha: 0
 	}, {
 		id: uid(),
 		pos: 100,

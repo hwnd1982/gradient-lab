@@ -5,13 +5,14 @@ import type { BgLayer, LinearGradient } from '../types';
 import { DuplicateIcon, EyeIcon, EyeOffIcon, PlusIcon, TrashIcon } from './icons';
 
 function freshLayer(): BgLayer {
+    // нейтральный fade (бывший дефолт демо-слоя), не цветной
     const gradient: LinearGradient = {
         type: 'linear',
-        angle: 135,
+        angle: 180,
         repeating: false,
         stops: [
-            { id: uid(), pos: 0, color: '#7c6cff', alpha: 1 },
-            { id: uid(), pos: 100, color: '#ff5e8a', alpha: 1 },
+            { id: uid(), pos: 0, color: '#101010', alpha: 0 },
+            { id: uid(), pos: 100, color: '#101010', alpha: 0.6 },
         ],
     };
     return {

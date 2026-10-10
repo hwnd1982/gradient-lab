@@ -23,7 +23,7 @@ import { json } from '../rest.ts';
 const MISMATCH = (method: string): Response =>
     json(405, { error: `метод ${method} не поддерживается` });
 
-export default async function handler(req: Request): Promise<Response> {
+export async function fetch(req: Request): Promise<Response> {
     const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
     const resource = segments[1] ?? '';
     const hasParam = segments.length > 2;

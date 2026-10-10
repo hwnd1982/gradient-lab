@@ -7330,7 +7330,7 @@ async function POST(req) {
 * Именованные GET/POST/PUT/DELETE — конвенция рантайма Vercel (Web-стиль).
 */
 const MISMATCH = (method) => json(405, { error: `метод ${method} не поддерживается` });
-async function handler(req) {
+async function fetch$1(req) {
 	const segments = new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/");
 	const resource = segments[1] ?? "";
 	const hasParam = segments.length > 2;
@@ -7361,4 +7361,4 @@ async function handler(req) {
 	}
 }
 //#endregion
-export { handler as default };
+export { fetch$1 as fetch };

@@ -300,7 +300,7 @@ curl -X DELETE http://localhost:5180/api/presets/veil
 
 ## Прод (Vercel)
 
-Тот же Agent API поднимается на прод-инстансе Vercel: функции `api/*.ts` (Node runtime, web-standard `Request`/`Response`), стор — **Upstash Redis через REST** (`KV_REST_API_URL` + `KV_REST_API_TOKEN` проставляет интеграция Upstash из Vercel Marketplace; чистый fetch, без npm-пакетов). Агент работает **тем же циклом** (PUT → warnings → analysis → journal → пресеты), curl-примеры из этого документа годятся после замены `http://localhost:5180` → `https://<project>.vercel.app`. Отличия:
+Тот же Agent API поднимается на прод-инстансе Vercel: функции `server/functions/*.ts` (Node runtime, web-standard `Request`/`Response`), стор — **Upstash Redis через REST** (`KV_REST_API_URL` + `KV_REST_API_TOKEN` проставляет интеграция Upstash из Vercel Marketplace; чистый fetch, без npm-пакетов). `api/` — генерируемые самодостаточные бандлы из `server/functions` (роллдаун-сборка `scripts/build-functions.mjs` на шаге `npm run build`; Vercel сканирует `api/` после buildCommand — источники там не живут, внешних рантайм-импортов у бандлов нет). Агент работает **тем же циклом** (PUT → warnings → analysis → journal → пресеты), curl-примеры из этого документа годятся после замены `http://localhost:5180` → `https://<project>.vercel.app`. Отличия:
 
 - **Нет SSE.** `/api/events` на проде не существует; браузер получает агентские PUT поллингом версии: `GET /api/state?since=N` раз в ~10 с (в скрытой вкладке поллинг стоит; при сбоях/квоте — экспоненциальный бэкофф до 60 с, сброс при первом живом ответе). Живой отклик PUT — ≤10 с; контрольная сверка GET после PUT — через ~12 с.
 - **Контракт версий** (эхо без броадкаста):

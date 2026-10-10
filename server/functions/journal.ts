@@ -1,7 +1,7 @@
-import type { JournalEntry } from '../src/schema.ts';
-import { JournalPostSchema } from '../src/schema.ts';
-import { K, configured, kvDelete, kvReadJson, kvWriteJson, notConfigured } from '../server/kv.ts';
-import { json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
+import type { JournalEntry } from '../../src/schema.ts';
+import { JournalPostSchema } from '../../src/schema.ts';
+import { K, configured, kvDelete, kvReadJson, kvWriteJson, notConfigured } from '../kv.ts';
+import { json, readJsonBody, requireMutationAuth, route } from '../rest.ts';
 
 /** Вместимость журнала (как кольцевой буфер dev-сервера). */
 const JOURNAL_LIMIT = 200;

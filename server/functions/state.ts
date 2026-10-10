@@ -1,7 +1,7 @@
-import { BlockStateSchema } from '../src/schema.ts';
-import { configured, kvReadJson, K, notConfigured, writeStateVersion } from '../server/kv.ts';
-import type { StoredState } from '../server/kv.ts';
-import { HttpError, json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
+import { BlockStateSchema } from '../../src/schema.ts';
+import { configured, kvReadJson, K, notConfigured, writeStateVersion } from '../kv.ts';
+import type { StoredState } from '../kv.ts';
+import { HttpError, json, readJsonBody, requireMutationAuth, route } from '../rest.ts';
 
 /**
  * GET /api/state — текущий стейт. Без ?since — голый BlockState (как в dev),

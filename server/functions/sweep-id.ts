@@ -1,7 +1,7 @@
-import { sweepPayload } from '../sweep.ts';
-import { K, configured, kvReadJson, notConfigured } from '../../server/kv.ts';
-import type { StoredSweep } from '../../server/kv.ts';
-import { HttpError, json, route } from '../../server/rest.ts';
+import { sweepPayload } from './sweep.ts';
+import { K, configured, kvReadJson, notConfigured } from '../kv.ts';
+import type { StoredSweep } from '../kv.ts';
+import { HttpError, json, route } from '../rest.ts';
 
 /** id sweep — uuid (crypto.randomUUID), в ключе Upstash допустимы [a-zA-Z0-9-]. */
 const SWEEP_ID_RE = /^[a-zA-Z0-9-]+$/;
@@ -12,7 +12,8 @@ interface SweepIdContext {
 
 /**
  * GET /api/sweep/<id> — статус/результат перебора path-параметром (прод).
- * Query-вариант GET /api/sweep?id=<id> живёт в api/sweep.ts — ответ тот же.
+ * Query-вариант GET /api/sweep?id=<id> живёт в server/functions/sweep.ts —
+ * ответ тот же.
  */
 export async function GET(_req: Request, ctx: SweepIdContext): Promise<Response> {
     return route(async () => {

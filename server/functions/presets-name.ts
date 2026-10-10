@@ -1,18 +1,11 @@
-import {
-    K,
-    configured,
-    kvDelete,
-    kvReadJson,
-    kvWriteJson,
-    notConfigured,
-} from '../../server/kv.ts';
+import { K, configured, kvDelete, kvReadJson, kvWriteJson, notConfigured } from '../kv.ts';
 import {
     json,
     parseStateBody,
     readJsonBody,
     requireMutationAuth,
     route,
-} from '../../server/rest.ts';
+} from '../rest.ts';
 import { sanitizeName } from '../../shared/targetKeys.ts';
 
 /** Имя пресета из пути /api/presets/<name> (сегмент после /presets/). */

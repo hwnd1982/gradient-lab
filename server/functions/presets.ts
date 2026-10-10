@@ -1,6 +1,6 @@
-import { BlockStateSchema } from '../src/schema.ts';
-import { K, configured, kvReadJson, notConfigured } from '../server/kv.ts';
-import { json, route } from '../server/rest.ts';
+import { BlockStateSchema } from '../../src/schema.ts';
+import { K, configured, kvReadJson, notConfigured } from '../kv.ts';
+import { json, route } from '../rest.ts';
 
 type PresetEntry = { name: string; state: unknown } | { name: string; error: string };
 

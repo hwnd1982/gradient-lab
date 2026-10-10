@@ -1,7 +1,8 @@
 /**
- * Мок-тест прод-функций api/*.ts: Upstash REST подменён in-memory Map через
- * global.fetch, хендлеры импортируются jiti как есть (TS, web-standard
- * Request/Response). Контракт — API.md. Запуск: npm test (tests/run.mjs).
+ * Мок-тест прод-функций server/functions/*.ts (источники; api/ — генерат
+ * сборки): Upstash REST подменён in-memory Map через global.fetch, хендлеры
+ * импортируются jiti как есть (TS, web-standard Request/Response). Контракт —
+ * API.md. Запуск: npm test (tests/run.mjs).
  */
 import { createJiti } from 'jiti';
 
@@ -57,16 +58,16 @@ const labState = () => JSON.parse(kv.get('lab:state'));
 const labVersion = () => labState().version;
 
 // ── импорт хендлеров (после подмены fetch: kv.ts замыкает globalThis.fetch при вызове) ──
-const stateApi = await jiti.import(`${ROOT}api/state.ts`);
-const syncApi = await jiti.import(`${ROOT}api/sync.ts`);
-const analysisApi = await jiti.import(`${ROOT}api/analysis.ts`);
-const warningsApi = await jiti.import(`${ROOT}api/warnings.ts`);
-const journalApi = await jiti.import(`${ROOT}api/journal.ts`);
-const presetsApi = await jiti.import(`${ROOT}api/presets.ts`);
-const presetApi = await jiti.import(`${ROOT}api/presets/[name].ts`);
-const sweepApi = await jiti.import(`${ROOT}api/sweep.ts`);
-const sweepIdApi = await jiti.import(`${ROOT}api/sweep/[id].ts`);
-const methodologyApi = await jiti.import(`${ROOT}api/methodology.ts`);
+const stateApi = await jiti.import(`${ROOT}server/functions/state.ts`);
+const syncApi = await jiti.import(`${ROOT}server/functions/sync.ts`);
+const analysisApi = await jiti.import(`${ROOT}server/functions/analysis.ts`);
+const warningsApi = await jiti.import(`${ROOT}server/functions/warnings.ts`);
+const journalApi = await jiti.import(`${ROOT}server/functions/journal.ts`);
+const presetsApi = await jiti.import(`${ROOT}server/functions/presets.ts`);
+const presetApi = await jiti.import(`${ROOT}server/functions/presets-name.ts`);
+const sweepApi = await jiti.import(`${ROOT}server/functions/sweep.ts`);
+const sweepIdApi = await jiti.import(`${ROOT}server/functions/sweep-id.ts`);
+const methodologyApi = await jiti.import(`${ROOT}server/functions/methodology.ts`);
 const { METHODOLOGY } = await jiti.import(`${ROOT}src/lib/methodology.ts`);
 const { MethodologySchema, AnalysisSchema, defaultBlockState } = await jiti.import(
     `${ROOT}src/schema.ts`

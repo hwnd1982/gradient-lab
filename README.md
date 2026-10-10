@@ -25,11 +25,11 @@ npm run lint
 - `src/presets/` — встроенные приёмы onsport и localStorage-хранилище пользовательских
 - `src/lib/` — color, drag, autofit, imageCache, shareUrl (base64url в hash), agentTransport (клиент Agent API: dev-middleware / прод-поллинг)
 - `vite-plugins/agent-api.ts` — dev Agent API (Vite-middleware + SSE)
-- `api/`, `server/`, `shared/` — прод Agent API для Vercel (функции + Upstash REST-клиент + общие хелперы)
+- `server/`, `shared/` — прод Agent API для Vercel (функции + Upstash REST-клиент + общие хелперы); `api/` — генерируемые самодостаточные бандлы из `server/functions` (сборка `scripts/build-functions.mjs`); источников в `api/` нет
 
 ## Agent API
 
-HTTP API для ИИ-агентов: live чтение/запись стейта, JSON-схема, warnings/analysis/journal, пресеты. Работает в двух режимах: dev — Vite-middleware на `npm run dev` (:5180, SSE); прод — функции Vercel `api/*.ts` + Upstash Redis (поллинг версий вместо SSE). Описание с curl-примерами — [API.md](./API.md).
+HTTP API для ИИ-агентов: live чтение/запись стейта, JSON-схема, warnings/analysis/journal, пресеты. Работает в двух режимах: dev — Vite-middleware на `npm run dev` (:5180, SSE); прод — функции Vercel `server/functions/*.ts` (бандлятся в `api/`) + Upstash Redis (поллинг версий вместо SSE). Описание с curl-примерами — [API.md](./API.md).
 
 ## Промт для агента
 
@@ -37,4 +37,4 @@ HTTP API для ИИ-агентов: live чтение/запись стейта
 
 ## Deploy
 
-`npm run build` → статика в `dist/` + функции `api/` → деплой на Vercel (framework Vite, стор Upstash — чеклист в [API.md](./API.md#прод-vercel), раздел «Setup»). На любой другой static-хостинг собирается без API — приложение полностью работает локально.
+`npm run build` → статика в `dist/` + самодостаточные бандлы функций в `api/` (генерируются из `server/functions`, Vercel сканирует `api/` после buildCommand) → деплой на Vercel (framework Vite, стор Upstash — чеклист в [API.md](./API.md#прод-vercel), раздел «Setup»). На любой другой static-хостинг собирается без API — приложение полностью работает локально.

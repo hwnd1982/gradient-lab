@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { BlockStateSchema } from '../src/schema.ts';
-import { configured, notConfigured } from '../server/kv.ts';
-import { json, route } from '../server/rest.ts';
+import { BlockStateSchema } from '../../src/schema.ts';
+import { configured, notConfigured } from '../kv.ts';
+import { json, route } from '../rest.ts';
 
 /** GET /api/schema — JSON Schema (draft 2020-12) типа BlockState, как в dev. */
 export async function GET(): Promise<Response> {

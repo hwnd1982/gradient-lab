@@ -6,7 +6,7 @@
     "types": ["node"],
     "skipLibCheck": true,
 
-    /* Vercel-функции api/: web-standard Request/Response (без DOM) */
+    /* Vercel-функции server/functions/ (api/ — генерат сборки): web-standard Request/Response (без DOM) */
     "module": "preserve",
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
@@ -22,5 +22,5 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["api", "server", "shared"]
+  "include": ["server", "shared", "server/functions"]
 }

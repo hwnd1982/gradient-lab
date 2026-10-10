@@ -13,7 +13,6 @@ dist-ssr
 *.local
 
 # генерируемые бандлы прод-функций (scripts/build-functions.mjs из server/functions)
-api/
 
 # Editor directories and files
 .vscode/*

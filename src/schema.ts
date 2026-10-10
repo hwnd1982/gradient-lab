@@ -560,16 +560,8 @@ export function defaultBlockState(): BlockState {
             posX: 50,
             posY: 50,
         },
-        layers: [
-            {
-                id: uid(),
-                visible: true,
-                opacity: 1,
-                blend: 'normal',
-                gradient: defaultLinearGradient(180),
-                rect: { x: 0, y: 0, w: 100, h: 100 },
-            },
-        ],
+        // чистый холст: ни одного демо-слоя — юзер добавляет слои сам
+        layers: [],
         mask: { enabled: false, gradient: defaultLinearGradient() },
         blur: {
             enabled: false,

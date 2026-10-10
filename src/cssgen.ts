@@ -18,6 +18,12 @@ export interface PreviewResult {
     underlay: CSSProperties | null;
     layers: CSSProperties[];
     baseImage: BaseImageHint | null;
+    /**
+     * Вуаль базового градиента поверх картинки (base.kind='image'): тот же
+     * base.gradient, но слоем над <img>. Alpha-профиль решает видимость —
+     * стопы со всеми α=0 дают невидимый, но корректный слой CSS.
+     */
+    baseVeil: CSSProperties | null;
 }
 
 /** 'rgba(r, g, b, a) pos%' — pos без clamp, может быть -13.94% / 116.91%. */
@@ -263,7 +269,14 @@ export function stateToPreview(state: BlockState): PreviewResult {
               }
             : null;
 
-    return { block, blur, underlay, layers, baseImage };
+    // вуаль: base.gradient применяется и при kind='image' — градиентом поверх
+    // картинки (в экспорте — первым слоем multiple backgrounds)
+    const baseVeil: CSSProperties | null =
+        state.base.kind === 'image'
+            ? { position: 'absolute', inset: 0, background: gradientToCss(state.base.gradient) }
+            : null;
+
+    return { block, blur, underlay, layers, baseImage, baseVeil };
 }
 
 /** Размер шрифта текста с градиентной заливкой (простая пропорция от ширины). */
@@ -304,7 +317,10 @@ export function stateToCssText(state: BlockState, opts: ExportTextOpts = {}): st
     } else if (state.base.kind === 'gradient') {
         block.push(`    background: ${g(state.base.gradient)};`);
     } else if (state.base.image) {
-        block.push(`    background-image: url("${state.base.image}");`);
+        // вуаль градиентом поверх картинки: multiple backgrounds, градиент
+        // ПЕРВЫМ слоем; size/position одним значением применяются к обоим
+        // слоям (для градиента без интринсик-размера — no-op)
+        block.push(`    background-image: ${g(state.base.gradient)}, url("${state.base.image}");`);
         block.push(`    background-size: ${cssFit(state.base.fit)};`);
         block.push(
             `    background-position: ${fmtNum(state.base.posX)}% ${fmtNum(state.base.posY)}%;`
@@ -439,6 +455,9 @@ export function stateToSassText(state: BlockState, opts: ExportTextOpts = {}): s
     const vars: string[] = [];
     if (state.base.kind === 'gradient') {
         vars.push(`$g-base: ${g(state.base.gradient)}`);
+    } else if (state.base.kind === 'image' && state.base.image) {
+        // вуаль поверх картинки (multiple backgrounds, градиент первым)
+        vars.push(`$g-veil: ${g(state.base.gradient)}`);
     }
     state.layers.forEach((layer, i) => {
         vars.push(`$g-${i + 1}: ${g(layer.gradient)}`);
@@ -478,7 +497,7 @@ export function stateToSassText(state: BlockState, opts: ExportTextOpts = {}): s
     } else if (state.base.kind === 'gradient') {
         out.push('    background: $g-base');
     } else if (state.base.image) {
-        out.push(`    background-image: url("${state.base.image}")`);
+        out.push(`    background-image: $g-veil, url("${state.base.image}")`);
         out.push(`    background-size: ${cssFit(state.base.fit)}`);
         out.push(
             `    background-position: ${fmtNum(state.base.posX)}% ${fmtNum(state.base.posY)}%`

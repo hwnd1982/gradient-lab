@@ -20,8 +20,15 @@ import { rolldown } from 'rolldown';
 const ROOT = new URL('..', import.meta.url).pathname;
 const API_DIR = `${ROOT}api`;
 
-/** Единственный catch-all: Hobby-план лимитит 12 функций. */
-const FUNCTIONS = [{ in: 'router', out: '[[...path]].js' }];
+/**
+ * Catch-all-роутер (все /api/*) + именованная notify: прямой entry-файл
+ * api/notify.js обслуживает POST /api/notify без роутера (Vercel отдаёт
+ * точному файлу приоритет над catch-all; роутер тоже умеет — дубль осознан).
+ */
+const FUNCTIONS = [
+    { in: 'router', out: '[[...path]].js' },
+    { in: 'notify', out: 'notify.js' },
+];
 
 await rm(API_DIR, { recursive: true, force: true });
 await mkdir(API_DIR, { recursive: true });

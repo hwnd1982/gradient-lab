@@ -259,7 +259,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     {
         id: 'onsport-slider-edge-fade',
         name: 'Край слайдера: растворение границ',
-        desc: 'оверлей на слайдер: градиентная база + blur растворяют границы (запрос фронт-лида)',
+        desc: 'оверлей на слайдер: градиентная база + blur растворяют границы',
         apply: {
             w: 600,
             h: 300,

@@ -12,6 +12,7 @@ function agentBrief(sessionId: string): string {
         `Ты работаешь с песочницей Gradient Lab: ${window.location.origin}`,
         `Сессия: ${sessionId} — заголовок "X-Lab-Session: ${sessionId}" на КАЖДЫЙ запрос.`,
         'Цикл: GET /api/state → правки → PUT /api/state (ПОЛНЫЙ BlockState) → GET /api/warnings (чинить до пусто) → GET /api/analysis?target=<таргет> (zoneMatchPercent/residuals/verdict/suggestedStops + hint) → повтор. Откат — GET /api/journal. Перебор радиуса — POST /api/sweep. Алгоритм целиком — GET /api/methodology.',
+        'Статусы юзеру — POST /api/notify {text: ≤200 симв}: уведомляй, КОГДА ЗАВЕРШИЛ значимый шаг или всю подгонку (тост в его браузере); не шли сообщения на каждую итерацию — это не чат.',
     ].join('\n');
 }
 

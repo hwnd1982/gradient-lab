@@ -1,4 +1,4 @@
-import type { BlockState, SweepPoint, SweepReq } from '../src/schema.ts';
+import type { BlockState, Notify, SweepPoint, SweepReq } from '../src/schema.ts';
 import { DEFAULT_SESSION, HttpError, json } from './rest.ts';
 
 /**
@@ -27,7 +27,7 @@ export const K = {
     presetIndex: 'lab:presets',
     preset: (name: string): string => `lab:preset:${name}`,
     // слоты сессий (id — X-Lab-Session, см. API.md «Сессии»)
-    /** {version, state, analysisReq?, sweepReq?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
+    /** {version, state, analysisReq?, sweepReq?, notify?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
     state: (id: string): string => `lab:s/${id}`,
     /** счётчик версий стейта слота (INCR при каждой записи) */
     statever: (id: string): string => `lab:s/${id}/ver`,
@@ -53,6 +53,12 @@ export interface StoredState {
     state: BlockState | null;
     analysisReq?: string;
     sweepReq?: StoredSweepReq;
+    /**
+     * Последнее сообщение агента юзеру (POST /api/notify): одно на слот,
+     * новое перезаписывает старое; клиент показывает тост по ts (новее
+     * последнего показанного) — стирать после доставки не нужно.
+     */
+    notify?: Notify;
 }
 
 /** Запись lab:sweep:<id>: заявка + статус/результат исполнения. */
@@ -177,9 +183,9 @@ export async function kvDelete(key: string): Promise<void> {
 }
 
 /**
- * Незакрытые заявки (analysisReq/sweepReq) переносятся в новую запись слота:
- * синк браузера и агентский PUT не должны затирать их, пока приложение не
- * забрало/не исполнило заявку.
+ * Незакрытые заявки (analysisReq/sweepReq) и непоказанное сообщение (notify)
+ * переносятся в новую запись слота: синк браузера и агентский PUT не должны
+ * затирать их, пока приложение не забрало/не исполнило заявку.
  */
 function withPending(
     next: { version: number; state: BlockState | null },
@@ -188,6 +194,7 @@ function withPending(
     const out: StoredSession = { ...next, name: prev.name, updatedAt: Date.now() };
     if (typeof prev.analysisReq === 'string') out.analysisReq = prev.analysisReq;
     if (prev.sweepReq !== undefined) out.sweepReq = prev.sweepReq;
+    if (prev.notify !== undefined) out.notify = prev.notify;
     return out;
 }
 
@@ -212,8 +219,7 @@ async function touchIndex(id: string, name: string): Promise<void> {
     const next = index.filter((e) => e.id !== id);
     next.push({ id, name, updatedAt: Date.now() });
     next.sort((a, b) => a.updatedAt - b.updatedAt);
-    const capped =
-        next.length > SESSIONS_LIMIT ? next.slice(next.length - SESSIONS_LIMIT) : next;
+    const capped = next.length > SESSIONS_LIMIT ? next.slice(next.length - SESSIONS_LIMIT) : next;
     await kvWriteJson(K.sessions, capped);
 }
 
@@ -285,7 +291,7 @@ export async function writeStateVersion(sessionId: string, state: BlockState): P
 
 /**
  * Положить заявку sweep в слот (доставка приложению поллом; версия не
- * инкрементится — как у analysisReq) с сохранением analysisReq.
+ * инкрементится — как у analysisReq) с сохранением analysisReq и notify.
  */
 export async function setSweepReq(sessionId: string, req: StoredSweepReq): Promise<void> {
     const st = await ensureSession(sessionId);
@@ -297,14 +303,16 @@ export async function setSweepReq(sessionId: string, req: StoredSweepReq): Promi
         sweepReq: req,
     };
     if (typeof st.analysisReq === 'string') next.analysisReq = st.analysisReq;
+    if (st.notify !== undefined) next.notify = st.notify;
     await kvWriteJson(K.state(sessionId), next);
 }
 
 /**
  * Положить заявку анализа в слот (доставка приложению поллом; версия не
- * инкрементится) с сохранением sweep-заявки. Единственный писатель analysisReq
- * кроме clearAnalysisReq — чтобы промах GET ?target= не стирал чужую sweep-заявку.
- * Идемпотентна: та же заявка не перезаписывается (без лишних команд).
+ * инкрементится) с сохранением sweep-заявки и notify. Единственный писатель
+ * analysisReq кроме clearAnalysisReq — чтобы промах GET ?target= не стирал
+ * чужую sweep-заявку. Идемпотентна: та же заявка не перезаписывается (без
+ * лишних команд).
  */
 export async function setAnalysisReq(sessionId: string, key: string): Promise<void> {
     const st = await ensureSession(sessionId);
@@ -317,10 +325,11 @@ export async function setAnalysisReq(sessionId: string, key: string): Promise<vo
         analysisReq: key,
     };
     if (st.sweepReq !== undefined) next.sweepReq = st.sweepReq;
+    if (st.notify !== undefined) next.notify = st.notify;
     await kvWriteJson(K.state(sessionId), next);
 }
 
-/** Стереть заявку sweep по id (результат получен); анализ-заявку сохраняет. */
+/** Стереть заявку sweep по id (результат получен); анализ-заявку и notify сохраняет. */
 export async function clearSweepReq(sessionId: string, id: string): Promise<void> {
     const st = await kvReadJson<StoredSession>(K.state(sessionId));
     if (st === null || st.sweepReq === undefined || st.sweepReq.id !== id) return;
@@ -331,10 +340,11 @@ export async function clearSweepReq(sessionId: string, id: string): Promise<void
         updatedAt: st.updatedAt,
     };
     if (typeof st.analysisReq === 'string') next.analysisReq = st.analysisReq;
+    if (st.notify !== undefined) next.notify = st.notify;
     await kvWriteJson(K.state(sessionId), next);
 }
 
-/** Стереть заявку анализа (свежий анализ получен); sweep-заявку сохраняет. */
+/** Стереть заявку анализа (свежий анализ получен); sweep-заявку и notify сохраняет. */
 export async function clearAnalysisReq(sessionId: string): Promise<void> {
     const st = await kvReadJson<StoredSession>(K.state(sessionId));
     if (st === null || typeof st.analysisReq !== 'string') return;
@@ -345,7 +355,30 @@ export async function clearAnalysisReq(sessionId: string): Promise<void> {
         updatedAt: st.updatedAt,
     };
     if (st.sweepReq !== undefined) next.sweepReq = st.sweepReq;
+    if (st.notify !== undefined) next.notify = st.notify;
     await kvWriteJson(K.state(sessionId), next);
+}
+
+/**
+ * Положить сообщение агента юзеру в слот (POST /api/notify): одно последнее,
+ * новое перезаписывает старое; версия не инкрементится — как у заявок, полл
+ * забирает notify тем же тиком. Соседние analysisReq/sweepReq сохраняет.
+ * Возвращает ts сообщения (клиент фильтрует показ по нему).
+ */
+export async function setNotify(sessionId: string, text: string): Promise<number> {
+    const st = await ensureSession(sessionId);
+    const ts = Date.now();
+    const next: StoredSession = {
+        version: st.version,
+        state: st.state,
+        name: st.name,
+        updatedAt: ts,
+        notify: { text, ts },
+    };
+    if (typeof st.analysisReq === 'string') next.analysisReq = st.analysisReq;
+    if (st.sweepReq !== undefined) next.sweepReq = st.sweepReq;
+    await kvWriteJson(K.state(sessionId), next);
+    return ts;
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { BlockState, SweepRequest } from '../schema';
+import type { BlockState, Notify, SweepRequest } from '../schema';
 import { SweepReqSchema } from '../schema';
 import { currentSession } from './session';
 
@@ -100,6 +100,8 @@ export interface StatePoll {
     analysisRequest?: string;
     /** заявка агента на авто-перебор (замена SSE sweep-request); стирается POST результата */
     sweepRequest?: SweepRequest;
+    /** последнее сообщение агента юзеру (POST /api/notify) — тост «Агент: …»; показ только если ts новее последнего */
+    notify?: Notify;
 }
 
 /** Поллинг версии стейта; null — сеть недоступна. */
@@ -122,6 +124,14 @@ export async function pollState(since: number): Promise<StatePoll | null> {
                 sweepRequest = { id: (sr as { id: string }).id, req: req.data };
             }
         }
+        const nf = o.notify;
+        const notify: Notify | undefined =
+            typeof nf === 'object' &&
+            nf !== null &&
+            typeof (nf as { text?: unknown }).text === 'string' &&
+            typeof (nf as { ts?: unknown }).ts === 'number'
+                ? (nf as Notify)
+                : undefined;
         return {
             status: r.status,
             version: typeof o.version === 'number' ? o.version : undefined,
@@ -129,6 +139,7 @@ export async function pollState(since: number): Promise<StatePoll | null> {
             state: 'state' in o ? o.state : undefined,
             analysisRequest: typeof o.analysisRequest === 'string' ? o.analysisRequest : undefined,
             sweepRequest,
+            notify,
         };
     } catch {
         return null;

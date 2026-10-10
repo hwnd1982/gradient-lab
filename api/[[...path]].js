@@ -5820,7 +5820,11 @@ const BaseSpecSchema = object({
 		"image"
 	]),
 	color: string(),
-	/** заливка базы при kind='gradient'; .default() — старые стейты без поля остаются валидными */
+	/**
+	* заливка базы при kind='gradient', вуаль поверх картинки при kind='image'
+	* (альфа-профиль решает видимость: все α=0 — вуаль прозрачна);
+	* .default() — старые стейты без поля остаются валидными
+	*/
 	gradient: GradientSchema.default(() => defaultLinearGradient(90, [{
 		id: uid(),
 		pos: 0,
@@ -6127,7 +6131,7 @@ object({
 const JournalPostSchema = union([object({
 	ts: number(),
 	fields: array(string()).min(1),
-	before: JournalMetricsSchema.optional()
+	before: JournalMetricsSchema.nullable().optional()
 }), object({
 	id: number(),
 	after: JournalMetricsSchema
@@ -6155,6 +6159,18 @@ const SweepResultSchema = object({
 	results: array(SweepPointSchema).optional(),
 	aborted: string().optional()
 }).refine((r) => r.results !== void 0 || r.aborted !== void 0, { message: "результат sweep должен содержать results или aborted" });
+/**
+* Сообщение агента юзеру (POST /api/notify): короткий статус по завершении
+* значимого шага или всей подгонки — не чат. На проде живёт в слоте сессии
+* (одно последнее, новое перезаписывает старое) и раздаётся поллом
+* GET /api/state?since=; в dev не хранится — SSE-событие notify → тост.
+* Клиент показывает тост «Агент: <text>» только если ts новее последнего
+* показанного (повторные доставки молча пропускаются).
+*/
+const NotifySchema = object({
+	text: string().min(1).max(200),
+	ts: number()
+});
 /** UI анимации — следующий этап. */
 const AnimSpecSchema = object({
 	enabled: boolean(),
@@ -6365,7 +6381,7 @@ const K = {
 	/** индекс имён пресетов (JSON-массив) — пресеты глобальны */
 	presetIndex: "lab:presets",
 	preset: (name) => `lab:preset:${name}`,
-	/** {version, state, analysisReq?, sweepReq?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
+	/** {version, state, analysisReq?, sweepReq?, notify?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
 	state: (id) => `lab:s/${id}`,
 	/** счётчик версий стейта слота (INCR при каждой записи) */
 	statever: (id) => `lab:s/${id}/ver`,
@@ -6450,9 +6466,9 @@ async function kvDelete(key) {
 	await kvRequest(`del/${encodeURIComponent(key)}`);
 }
 /**
-* Незакрытые заявки (analysisReq/sweepReq) переносятся в новую запись слота:
-* синк браузера и агентский PUT не должны затирать их, пока приложение не
-* забрало/не исполнило заявку.
+* Незакрытые заявки (analysisReq/sweepReq) и непоказанное сообщение (notify)
+* переносятся в новую запись слота: синк браузера и агентский PUT не должны
+* затирать их, пока приложение не забрало/не исполнило заявку.
 */
 function withPending(next, prev) {
 	const out = {
@@ -6462,6 +6478,7 @@ function withPending(next, prev) {
 	};
 	if (typeof prev.analysisReq === "string") out.analysisReq = prev.analysisReq;
 	if (prev.sweepReq !== void 0) out.sweepReq = prev.sweepReq;
+	if (prev.notify !== void 0) out.notify = prev.notify;
 	return out;
 }
 /** Прочитать индекс сессий (как есть, порядок — по updatedAt по возрастанию). */
@@ -6561,7 +6578,7 @@ async function writeStateVersion(sessionId, state) {
 }
 /**
 * Положить заявку sweep в слот (доставка приложению поллом; версия не
-* инкрементится — как у analysisReq) с сохранением analysisReq.
+* инкрементится — как у analysisReq) с сохранением analysisReq и notify.
 */
 async function setSweepReq(sessionId, req) {
 	const st = await ensureSession(sessionId);
@@ -6573,13 +6590,15 @@ async function setSweepReq(sessionId, req) {
 		sweepReq: req
 	};
 	if (typeof st.analysisReq === "string") next.analysisReq = st.analysisReq;
+	if (st.notify !== void 0) next.notify = st.notify;
 	await kvWriteJson(K.state(sessionId), next);
 }
 /**
 * Положить заявку анализа в слот (доставка приложению поллом; версия не
-* инкрементится) с сохранением sweep-заявки. Единственный писатель analysisReq
-* кроме clearAnalysisReq — чтобы промах GET ?target= не стирал чужую sweep-заявку.
-* Идемпотентна: та же заявка не перезаписывается (без лишних команд).
+* инкрементится) с сохранением sweep-заявки и notify. Единственный писатель
+* analysisReq кроме clearAnalysisReq — чтобы промах GET ?target= не стирал
+* чужую sweep-заявку. Идемпотентна: та же заявка не перезаписывается (без
+* лишних команд).
 */
 async function setAnalysisReq(sessionId, key) {
 	const st = await ensureSession(sessionId);
@@ -6592,9 +6611,10 @@ async function setAnalysisReq(sessionId, key) {
 		analysisReq: key
 	};
 	if (st.sweepReq !== void 0) next.sweepReq = st.sweepReq;
+	if (st.notify !== void 0) next.notify = st.notify;
 	await kvWriteJson(K.state(sessionId), next);
 }
-/** Стереть заявку sweep по id (результат получен); анализ-заявку сохраняет. */
+/** Стереть заявку sweep по id (результат получен); анализ-заявку и notify сохраняет. */
 async function clearSweepReq(sessionId, id) {
 	const st = await kvReadJson(K.state(sessionId));
 	if (st === null || st.sweepReq === void 0 || st.sweepReq.id !== id) return;
@@ -6605,9 +6625,10 @@ async function clearSweepReq(sessionId, id) {
 		updatedAt: st.updatedAt
 	};
 	if (typeof st.analysisReq === "string") next.analysisReq = st.analysisReq;
+	if (st.notify !== void 0) next.notify = st.notify;
 	await kvWriteJson(K.state(sessionId), next);
 }
-/** Стереть заявку анализа (свежий анализ получен); sweep-заявку сохраняет. */
+/** Стереть заявку анализа (свежий анализ получен); sweep-заявку и notify сохраняет. */
 async function clearAnalysisReq(sessionId) {
 	const st = await kvReadJson(K.state(sessionId));
 	if (st === null || typeof st.analysisReq !== "string") return;
@@ -6618,7 +6639,32 @@ async function clearAnalysisReq(sessionId) {
 		updatedAt: st.updatedAt
 	};
 	if (st.sweepReq !== void 0) next.sweepReq = st.sweepReq;
+	if (st.notify !== void 0) next.notify = st.notify;
 	await kvWriteJson(K.state(sessionId), next);
+}
+/**
+* Положить сообщение агента юзеру в слот (POST /api/notify): одно последнее,
+* новое перезаписывает старое; версия не инкрементится — как у заявок, полл
+* забирает notify тем же тиком. Соседние analysisReq/sweepReq сохраняет.
+* Возвращает ts сообщения (клиент фильтрует показ по нему).
+*/
+async function setNotify(sessionId, text) {
+	const st = await ensureSession(sessionId);
+	const ts = Date.now();
+	const next = {
+		version: st.version,
+		state: st.state,
+		name: st.name,
+		updatedAt: ts,
+		notify: {
+			text,
+			ts
+		}
+	};
+	if (typeof st.analysisReq === "string") next.analysisReq = st.analysisReq;
+	if (st.sweepReq !== void 0) next.sweepReq = st.sweepReq;
+	await kvWriteJson(K.state(sessionId), next);
+	return ts;
 }
 /**
 * Создать/переименовать сессию (PUT /api/sessions/<id>): несуществующая —
@@ -6708,7 +6754,7 @@ async function GET$11(req) {
 * референс убрали: кэш сбрасываем, старьё не отдаём (заявку не трогаем — если
 * агент ждёт таргет, она разрулится маркером blocked:'no-reference').
 */
-async function POST$4(req) {
+async function POST$5(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		requireMutationAuth(req);
@@ -6746,7 +6792,7 @@ async function GET$10(req) {
 * lab:journal целиком (read-modify-write, cap 200) — id = max+1, уникальны и
 * после DELETE.
 */
-async function POST$3(req) {
+async function POST$4(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		requireMutationAuth(req);
@@ -6918,6 +6964,34 @@ F6 СТОП: zoneMatch стабилен 2 замера (±0.3 — не прог�
 */
 async function GET$9() {
 	return route(async () => json(200, METHODOLOGY));
+}
+//#endregion
+//#region server/functions/notify.ts
+/** Тело POST /api/notify: текст сообщения (ts присваивает сервер). */
+const NotifyPostSchema = NotifySchema.pick({ text: true });
+/**
+* POST /api/notify — короткий статус агенту → юзеру (тост «Агент: <text>» в
+* браузере той же сессии). Пишется в слот lab:s/<id> (X-Lab-Session, default
+* 'default'; одно последнее сообщение — новое перезаписывает старое), браузер
+* забирает его поллом GET /api/state?since= (поле notify). Не чат: агент
+* уведомляет по завершении значимого шага/всей подгонки, не на каждую
+* итерацию. Мутация — Authorization: Bearer при заданном LAB_API_TOKEN.
+*/
+async function POST$3(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const sessionId = sessionFromRequest(req);
+		const parsed = NotifyPostSchema.safeParse(await readJsonBody(req));
+		if (!parsed.success) return json(400, {
+			error: "invalid notify payload",
+			issues: parsed.error.issues
+		});
+		return json(200, {
+			ok: true,
+			ts: await setNotify(sessionId, parsed.data.text)
+		});
+	});
 }
 //#endregion
 //#region server/functions/ping.ts
@@ -7107,8 +7181,9 @@ async function DELETE(req) {
 * поллинг-контракт: {version, state} при version > N, иначе {version: N,
 * unchanged: true} (не 404 — поллинг дешёвый: слот читается ровно 1 командой).
 * Попутно analysisRequest/sweepRequest — заявки агента (анализ таргета /
-* авто-перебор), живущие в том же слоте lab:s/<id> (замена SSE,
-* см. API.md «Прод (Vercel)» и «Сессии»).
+* авто-перебор) и notify — последнее сообщение агента юзеру (тост), все живут
+* в том же слоте lab:s/<id> (замена SSE, см. API.md «Прод (Vercel)» и
+* «Сессии»).
 */
 async function GET$3(req) {
 	return route(async () => {
@@ -7119,6 +7194,7 @@ async function GET$3(req) {
 		const analysisRequest = typeof stored.analysisReq === "string" ? stored.analysisReq : void 0;
 		const reqField = analysisRequest === void 0 ? {} : { analysisRequest };
 		const sweepField = stored.sweepReq === void 0 ? {} : { sweepRequest: stored.sweepReq };
+		const notifyField = stored.notify === void 0 ? {} : { notify: stored.notify };
 		const sinceRaw = new URL(req.url, "http://localhost").searchParams.get("since");
 		if (sinceRaw === null) {
 			if (state === null || version === null) return json(404, { error: "стейт ещё не синкался: откройте приложение в браузере (оно шлёт POST /api/sync) или положите свой через PUT /api/state" });
@@ -7130,13 +7206,15 @@ async function GET$3(req) {
 			version,
 			state,
 			...reqField,
-			...sweepField
+			...sweepField,
+			...notifyField
 		});
 		return json(200, {
 			version: since,
 			unchanged: true,
 			...reqField,
-			...sweepField
+			...sweepField,
+			...notifyField
 		});
 	});
 }
@@ -7348,15 +7426,16 @@ async function fetch$1(req) {
 		case "GET warnings": return GET(req);
 		case "POST warnings": return POST(req);
 		case "GET analysis": return GET$11(req);
-		case "POST analysis": return POST$4(req);
+		case "POST analysis": return POST$5(req);
 		case "GET journal": return GET$10(req);
-		case "POST journal": return POST$3(req);
+		case "POST journal": return POST$4(req);
 		case "DELETE journal": return DELETE$2(req);
 		case "GET presets": return hasParam ? GET$6(req) : GET$7();
 		case "PUT presets": return PUT$2(req);
 		case "DELETE presets": return DELETE$1(req);
 		case "GET sweep": return hasParam ? GET$1(req) : GET$2(req);
 		case "POST sweep": return POST$2(req);
+		case "POST notify": return POST$3(req);
 		case "GET sessions": return GET$4();
 		case "PUT sessions": return PUT$1(req);
 		case "DELETE sessions": return DELETE(req);

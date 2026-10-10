@@ -102,7 +102,11 @@ export type BgLayer = z.infer<typeof BgLayerSchema>;
 export const BaseSpecSchema = z.object({
     kind: z.enum(['color', 'gradient', 'image']),
     color: z.string(),
-    /** заливка базы при kind='gradient'; .default() — старые стейты без поля остаются валидными */
+    /**
+     * заливка базы при kind='gradient', вуаль поверх картинки при kind='image'
+     * (альфа-профиль решает видимость: все α=0 — вуаль прозрачна);
+     * .default() — старые стейты без поля остаются валидными
+     */
     gradient: GradientSchema.default(() =>
         defaultLinearGradient(90, [
             { id: uid(), pos: 0, color: '#101010', alpha: 1 },
@@ -449,6 +453,20 @@ export const SweepResultSchema = z
     });
 export type SweepResult = z.infer<typeof SweepResultSchema>;
 
+/**
+ * Сообщение агента юзеру (POST /api/notify): короткий статус по завершении
+ * значимого шага или всей подгонки — не чат. На проде живёт в слоте сессии
+ * (одно последнее, новое перезаписывает старое) и раздаётся поллом
+ * GET /api/state?since=; в dev не хранится — SSE-событие notify → тост.
+ * Клиент показывает тост «Агент: <text>» только если ts новее последнего
+ * показанного (повторные доставки молча пропускаются).
+ */
+export const NotifySchema = z.object({
+    text: z.string().min(1).max(200),
+    ts: z.number(),
+});
+export type Notify = z.infer<typeof NotifySchema>;
+
 /** UI анимации — следующий этап. */
 const AnimSpecSchema = z.object({
     enabled: z.boolean(),
@@ -531,8 +549,10 @@ export function defaultBlockState(): BlockState {
         base: {
             kind: 'color',
             color: '#101010',
-            gradient: defaultLinearGradient(90, [
+            // дефолт-вуаль: чёрная наполовину, ниже — растворяется (для kind='image')
+            gradient: defaultLinearGradient(180, [
                 { id: uid(), pos: 0, color: '#101010', alpha: 1 },
+                { id: uid(), pos: 50, color: '#101010', alpha: 1 },
                 { id: uid(), pos: 100, color: '#101010', alpha: 0 },
             ]),
             image: null,

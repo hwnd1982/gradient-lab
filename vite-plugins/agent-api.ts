@@ -7,6 +7,7 @@ import {
     AnalysisPostSchema,
     BlockStateSchema,
     JournalPostSchema,
+    NotifySchema,
     SweepReqSchema,
     SweepResultSchema,
     WarningsPayloadSchema,
@@ -343,6 +344,31 @@ export function agentApi(): Plugin {
                 s.status = 'done';
             }
             sendJson(res, 200, { ok: true, id: data.id });
+            return;
+        }
+
+        // сообщение агента юзеру (POST /api/notify): broadcast-тост браузеру по
+        // SSE {type:'notify'} — клиент показывает тост сам, хранить не нужно
+        // (dev мгновенный и однопользовательский)
+        if (method === 'POST' && url === '/notify') {
+            const raw = await readBody(req);
+            let json: unknown;
+            try {
+                json = JSON.parse(raw);
+            } catch {
+                sendJson(res, 400, { error: 'тело запроса не является JSON' });
+                return;
+            }
+            const parsed = NotifySchema.pick({ text: true }).safeParse(json);
+            if (!parsed.success) {
+                sendJson(res, 400, {
+                    error: 'invalid notify payload',
+                    issues: parsed.error.issues,
+                });
+                return;
+            }
+            broadcast({ type: 'notify', text: parsed.data.text });
+            sendJson(res, 200, { ok: true, ts: Date.now() });
             return;
         }
 

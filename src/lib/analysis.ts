@@ -185,17 +185,18 @@ function edgeStretch(snapshot: HTMLCanvasElement, pad: number): HTMLCanvasElemen
 
 /**
  * Приближённый рендер блока в canvas W×H: база (цвет/градиент/картинка с
- * object-fit) → градиентные слои (opacity/blend) → underlay-затемнение →
- * blur-слой → маска блока. Порядок как в экспорте (base → layers →
- * underlay ::before → blur ::after). backdrop-filter эмулируем: подстилающие
- * слои (база+слои+underlay) блюрятся внутри blur.rect через ctx.filter
- * (CSS блюрит и стейдж за блоком — мы приближаем только содержимым блока);
- * при stage.isolated за краем блока блюр сэмплит копии краевых пикселей.
- * Маска blur-слоя применяется к элементу ЦЕЛИКОМ: backdrop-эффект идёт через
- * destination-in с градиентом маски ДО наложения заливки — вклад блюра
- * пропорционален локальной альфе маски (progressive blur), под ним
- * просвечивает неразмытый контент, сверху — маскированная заливка.
- * clip-text canvas не умеет — в дифф попадает «цветовая» часть блока.
+ * object-fit + вуаль base.gradient поверх неё) → градиентные слои
+ * (opacity/blend) → underlay-затемнение → blur-слой → маска блока. Порядок
+ * как в экспорте (base → layers → underlay ::before → blur ::after).
+ * backdrop-filter эмулируем: подстилающие слои (база+слои+underlay) блюрятся
+ * внутри blur.rect через ctx.filter (CSS блюрит и стейдж за блоком — мы
+ * приближаем только содержимым блока); при stage.isolated за краем блока
+ * блюр сэмплит копии краевых пикселей. Маска blur-слоя применяется к
+ * элементу ЦЕЛИКОМ: backdrop-эффект идёт через destination-in с градиентом
+ * маски ДО наложения заливки — вклад блюра пропорционален локальной альфе
+ * маски (progressive blur), под ним просвечивает неразмытый контент, сверху
+ * — маскированная заливка. clip-text canvas не умеет — в дифф попадает
+ * «цветовая» часть блока.
  */
 function renderBlock(state: BlockState, baseImg: HTMLCanvasElement | null): HTMLCanvasElement {
     const scale = Math.min(1, MAX_SIDE / Math.max(state.w, state.h));
@@ -231,6 +232,9 @@ function renderBlock(state: BlockState, baseImg: HTMLCanvasElement | null): HTML
                 dh
             );
         }
+        // вуаль базового градиента поверх картинки (как в превью/экспорте
+        // multiple backgrounds — дифф видит затемнение от base.gradient)
+        paintGradient(ctx, state.base.gradient, block);
     }
 
     for (const layer of state.layers) {

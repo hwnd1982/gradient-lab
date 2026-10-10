@@ -26,3 +26,6 @@ dist-ssr
 # env
 .env
 .env.*
+
+# временные файлы агента (smoke-скрипты и пр.)
+scratch

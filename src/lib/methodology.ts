@@ -4,7 +4,7 @@ import { MethodologySchema } from '../schema.ts';
 import type { Methodology } from '../schema.ts';
 
 /**
- * Методика подгонки фейда v2 (утверждена фронт-лидом по живой сессии):
+ * Методика подгонки фейда v2 (выработана на живой сессии):
  * исполняемая процедура F0–F6. Единственный источник — этот модуль; его
  * отдают GET /api/methodology (dev-middleware и прод api/methodology.ts),
  * текст-блок — зеркало раздела «Методика подгонки» в API.md (менять только

@@ -1,8 +1,31 @@
 {
     "name": "gradient-lab",
     "private": true,
-    "version": "0.0.0",
+    "version": "1.0.0",
     "type": "module",
+    "description": "Песочница подбора CSS-градиентов, градиентных масок и blur-затуханий с live-сравнением по макету и агентским HTTP API",
+    "author": "hwnd1982",
+    "license": "MIT",
+    "keywords": [
+        "gradient",
+        "css",
+        "mask",
+        "blur",
+        "backdrop-filter",
+        "sandbox",
+        "figma",
+        "design-tool",
+        "vercel",
+        "ai-agent"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/hwnd1982/gradient-lab.git"
+    },
+    "bugs": {
+        "url": "https://github.com/hwnd1982/gradient-lab/issues"
+    },
+    "homepage": "https://github.com/hwnd1982/gradient-lab#readme",
     "scripts": {
         "dev": "vite",
         "build": "tsc -b && vite build && node scripts/build-functions.mjs",

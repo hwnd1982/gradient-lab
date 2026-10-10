@@ -1,6 +1,13 @@
 import { BlockStateSchema } from '../../src/schema.ts';
 import { configured, ensureSession, notConfigured, writeStateVersion } from '../kv.ts';
-import { HttpError, json, readJsonBody, requireMutationAuth, route, sessionFromRequest } from '../rest.ts';
+import {
+    HttpError,
+    json,
+    readJsonBody,
+    requireMutationAuth,
+    route,
+    sessionFromRequest,
+} from '../rest.ts';
 
 /**
  * GET /api/state — текущий стейт сессии (X-Lab-Session, default 'default';
@@ -9,8 +16,9 @@ import { HttpError, json, readJsonBody, requireMutationAuth, route, sessionFromR
  * поллинг-контракт: {version, state} при version > N, иначе {version: N,
  * unchanged: true} (не 404 — поллинг дешёвый: слот читается ровно 1 командой).
  * Попутно analysisRequest/sweepRequest — заявки агента (анализ таргета /
- * авто-перебор), живущие в том же слоте lab:s/<id> (замена SSE,
- * см. API.md «Прод (Vercel)» и «Сессии»).
+ * авто-перебор) и notify — последнее сообщение агента юзеру (тост), все живут
+ * в том же слоте lab:s/<id> (замена SSE, см. API.md «Прод (Vercel)» и
+ * «Сессии»).
  */
 export async function GET(req: Request): Promise<Response> {
     return route(async () => {
@@ -23,6 +31,7 @@ export async function GET(req: Request): Promise<Response> {
             typeof stored.analysisReq === 'string' ? stored.analysisReq : undefined;
         const reqField = analysisRequest === undefined ? {} : { analysisRequest };
         const sweepField = stored.sweepReq === undefined ? {} : { sweepRequest: stored.sweepReq };
+        const notifyField = stored.notify === undefined ? {} : { notify: stored.notify };
 
         const sinceRaw = new URL(req.url, 'http://localhost').searchParams.get('since');
         if (sinceRaw === null) {
@@ -38,9 +47,15 @@ export async function GET(req: Request): Promise<Response> {
             throw new HttpError(400, { error: '?since должен быть неотрицательным целым' });
         }
         if (state !== null && version !== null && version > since) {
-            return json(200, { version, state, ...reqField, ...sweepField });
+            return json(200, { version, state, ...reqField, ...sweepField, ...notifyField });
         }
-        return json(200, { version: since, unchanged: true, ...reqField, ...sweepField });
+        return json(200, {
+            version: since,
+            unchanged: true,
+            ...reqField,
+            ...sweepField,
+            ...notifyField,
+        });
     });
 }
 

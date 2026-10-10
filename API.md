@@ -154,7 +154,7 @@ curl http://localhost:5180/api/journal
 
 ### `GET /api/events` — SSE-поток обновлений
 
-`text/event-stream`. При подключении сразу присылается текущий кэш (если есть), далее — события `{ "type": "state", "state": {...} }` на каждый `PUT /api/state`, `{ "type": "analysis-request", "target": "..." }`, когда агент запросил `GET /api/analysis?target=...` (приложение пересчитывает анализ под этот таргет), `{ "type": "sweep-request", "id": "...", "req": {...} }` на каждый `POST /api/sweep` (приложение исполняет авто-перебор) и `{ "type": "journal-cleared" }` на `DELETE /api/journal` (приложение чистит локальное зеркало журнала — иначе `hint` видел бы удалённые записи; на проде то же ловится по id-регрессии в следующем POST). Heartbeat `: ping` каждые 25 секунд.
+`text/event-stream`. При подключении сразу присылается текущий кэш (если есть), далее — события `{ "type": "state", "state": {...} }` на каждый `PUT /api/state`, `{ "type": "analysis-request", "target": "..." }`, когда агент запросил `GET /api/analysis?target=...` (приложение пересчитывает анализ под этот таргет), `{ "type": "sweep-request", "id": "...", "req": {...} }` на каждый `POST /api/sweep` (приложение исполняет авто-перебор), `{ "type": "notify", "text": "..." }` на каждый `POST /api/notify` (приложение показывает тост) и `{ "type": "journal-cleared" }` на `DELETE /api/journal` (приложение чистит локальное зеркало журнала — иначе `hint` видел бы удалённые записи; на проде то же ловится по id-регрессии в следующем POST). Heartbeat `: ping` каждые 25 секунд.
 
 ```bash
 curl -N --max-time 30 http://localhost:5180/api/events
@@ -166,6 +166,7 @@ curl -N --max-time 30 http://localhost:5180/api/events
 data: {"type":"state","state":{ ...BlockState... }}
 data: {"type":"analysis-request","target":"blurMask"}
 data: {"type":"sweep-request","id":"<uuid>","req":{"field":"blur.radius","from":8,"to":14,"steps":4}}
+data: {"type":"notify","text":"поставил стоп на 58.4%"}
 data: {"type":"journal-cleared"}
 ```
 
@@ -209,7 +210,23 @@ curl 'http://localhost:5180/api/sweep?id=<uuid>'
 - Статусы: `pending` (заявка ждёт/исполняется — поллите раз в ~1 с, прод ~3 с), `done`, `aborted` (результат мог не приехать вовсе — например, вкладка закрыта: заявка висит `pending` до нового sweep или рестарта dev-сервера; на проде ключ живёт в `lab:s/<id>/sweep/<sweepId>`).
 - `404` — id не существует (dev-сервер перезапускался — память потеряна). На проде тот же результат доступен и как `GET /api/sweep/<id>` (path-параметр); статусы сессионные — читаются с тем же заголовком `X-Lab-Session`, что и заявка (чужой сессии тот же id отдаст `404`). GET-статусы (`?id=` и `/<id>`) открыты; `Authorization: Bearer` при заданном `LAB_API_TOKEN` требуют записи — `POST /api/sweep` (заявка и результат), как остальные мутации.
 
-## Методика подгонки v2 (утверждена фронт-лидом по живой сессии)
+### `POST /api/notify` — сообщение юзеру (тост в его браузере)
+
+Короткий статус от агента: «перебор радиуса завершён: лучший 11.2 (zoneMatch 98.1)», «жду твой прогон». Правило: **сообщения — короткий статус для юзера, не чат** — уведомляйте, когда завершили значимый шаг или всю подгонку; не отправляйте их на каждую итерацию.
+
+```bash
+curl -X POST http://localhost:5180/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"поставил стоп на 58.4%, дальше смотришь ты"}'
+# {"ok":true,"ts":1760000123}
+```
+
+- Тело: `{text}` — строка 1..200 символов (пустая/длинная/не-JSON — `400` с `issues`); `ts` присваивает сервер и возвращает в ответе.
+- Сессия — по заголовку `X-Lab-Session` (как у state; без заголовка — `default`): тост увидят вкладки этой сессии.
+- Доставка: dev — SSE-событие `{"type":"notify","text":"..."}` (тост сразу, не хранится); прод — поле `notify` в ответе поллинга `GET /api/state?since=` (слот хранит одно последнее сообщение, новое перезаписывает старое, синк/PUT его не стирают). Клиент показывает тост «Агент: \<text\>» только если `ts` новее последнего показанного — повторные доставки того же сообщения молча пропускаются, стирать notify не нужно.
+- Мутация: `Authorization: Bearer` при заданном `LAB_API_TOKEN`, как прочие записи. Схема — `NotifySchema` в `src/schema.ts`.
+
+## Методика подгонки v2 (выработана на живой сессии)
 
 Исполняемая процедура: фазы F0–F6 с входом/выходом и запретом возврата к зафиксированным ручкам. Машиночитаемая копия — `GET /api/methodology` (фазы + инварианты + этот же текст одним блоком; единый источник — `src/lib/methodology.ts`, правки только синхронно). Текст процедуры:
 
@@ -304,14 +321,14 @@ curl -X DELETE http://localhost:5180/api/presets/veil
 
 - **Нет SSE.** `/api/events` на проде не существует; браузер получает агентские PUT поллингом версии: `GET /api/state?since=N` раз в ~10 с (в скрытой вкладке поллинг стоит; при сбоях/квоте — экспоненциальный бэкофф до 60 с, сброс при первом живом ответе). Живой отклик PUT — ≤10 с; контрольная сверка GET после PUT — через ~12 с.
 - **Контракт версий** (эхо без броадкаста):
-  - любая запись стейта — `PUT /api/state` (агент) или `POST /api/sync` (браузер, прод-аналог `__sync`) — инкрементит счётчик `lab:s/<id>/ver` и пишет слот `lab:s/<id> = {version, state, analysisReq?, sweepReq?, name, updatedAt}` — версия, стейт и заявки агента (анализ таргета / авто-перебор) **одним ключом**, чтобы полл-тик стоил ровно 1 команду Upstash;
-  - `GET /api/state?since=N` → `200 {version, state, analysisRequest?, sweepRequest?}` при `version > N`, иначе `200 {version: N, unchanged: true, analysisRequest?, sweepRequest?}` (**не 404** — поллинг дешёвый); без `?since` — голый `BlockState`, как в dev; заявки отдаются в обоих ветках, пока не закрыты (анализ — `POST /api/analysis`, sweep — `POST /api/__sweep`);
-  - `POST /api/sync` (тело `{state}` или голый стейт) отвечает `{ok:true, version}` — браузер запоминает «моя версия»; `PUT /api/state` отвечает `{ok:true, version}`;
-  - **почему нет петли**: `sync` ничего не броадкастит; браузер не запрашивает обратно версию, которую сам записал (свой синк подтянул `since`), а чужую версию применяет и не отсылает обратно (identity-чек в подписке стора — тот же механизм, что в dev с SSE). Потерянный ответ синка страховён контент-сверкой: если приехал стейт байт-в-байт наш (последний отправленный или текущий локальный), применяется только версия, контент не трогается — несинкнутая юзерская правка не откатывается (гарантия практическая: при потере ответа синка + юзерской правке в окне до полл-чтения (~1с) правка B может быть откачена — редкая комбинация, восстановима повторной правкой или Ctrl+Z). Юзерские правки поверх применённого — обычный last-writer-wins.
+    - любая запись стейта — `PUT /api/state` (агент) или `POST /api/sync` (браузер, прод-аналог `__sync`) — инкрементит счётчик `lab:s/<id>/ver` и пишет слот `lab:s/<id> = {version, state, analysisReq?, sweepReq?, notify?, name, updatedAt}` — версия, стейт и заявки агента (анализ таргета / авто-перебор) + его последнее сообщение юзеру **одним ключом**, чтобы полл-тик стоил ровно 1 команду Upstash;
+    - `GET /api/state?since=N` → `200 {version, state, analysisRequest?, sweepRequest?, notify?}` при `version > N`, иначе `200 {version: N, unchanged: true, analysisRequest?, sweepRequest?, notify?}` (**не 404** — поллинг дешёвый); без `?since` — голый `BlockState`, как в dev; заявки отдаются в обоих ветках, пока не закрыты (анализ — `POST /api/analysis`, sweep — `POST /api/__sweep`), `notify` — пока не перезаписан следующим `POST /api/notify`;
+    - `POST /api/sync` (тело `{state}` или голый стейт) отвечает `{ok:true, version}` — браузер запоминает «моя версия»; `PUT /api/state` отвечает `{ok:true, version}`;
+    - **почему нет петли**: `sync` ничего не броадкастит; браузер не запрашивает обратно версию, которую сам записал (свой синк подтянул `since`), а чужую версию применяет и не отсылает обратно (identity-чек в подписке стора — тот же механизм, что в dev с SSE). Потерянный ответ синка страховён контент-сверкой: если приехал стейт байт-в-байт наш (последний отправленный или текущий локальный), применяется только версия, контент не трогается — несинкнутая юзерская правка не откатывается (гарантия практическая: при потере ответа синка + юзерской правке в окне до полл-чтения (~1с) правка B может быть откачена — редкая комбинация, восстановима повторной правкой или Ctrl+Z). Юзерские правки поверх применённого — обычный last-writer-wins.
 - **Запрос анализа таргета** (`GET /api/analysis?target=X` при кэше другого таргета): промах — это **запись** (read-modify-write `analysisReq` в `lab:s/<id>`, с сохранением `sweepReq`), поэтому при заданном `LAB_API_TOKEN` он требует `Authorization: Bearer`, как остальные агентские мутации (анти-спам заявок от анонимных клиентов); попадание в кэш и чтение без `?target` открыты. Заявку браузер забирает тем же поллом (поле `analysisRequest`), переключает таргет, пересчитывает и присылает анализ `POST /api/analysis`, стирая заявку. Итог для агента: `404 {requested}` → повторять GET раз в ~5 с, ответ придёт в течение ~12 с.
 - **Авто-перебор и методика на проде**: `POST /api/sweep` пишет заявку в `sweepReq` того же слота `lab:s/<id>` (полл-тик остаётся 1 командой; транзиентные значения на сервер не синкаются — лишних версий/команд sweep не создаёт) плюс `lab:s/<id>/sweep/<sweepId> = {req, status, results?}` — id сессии в ключе, чужой sweep по id не читается; браузер подхватывает заявку поллом (≤10 с), исполняет (~1.5–2 с на точку; таймаут точки 10 с → `aborted`, без референса — это первые же 10 с) и шлёт результат `POST /api/__sweep` (rewrite → `POST /api/sweep`, тело `{id, results?, aborted?}`), который обновляет ключ результата и стирает заявку. Статус: `GET /api/sweep?id=` или `GET /api/sweep/<id>` — поллите раз в ~3 с, исполнение всей таблицы до ~30 с. `GET /api/methodology` Upstash не касается — отвечает всегда, даже без env.
 - **Авторизация (опционально)**: env `LAB_API_TOKEN` — все мутации (PUT state, POST sync/analysis/warnings/journal, DELETE journal, PUT/DELETE presets, промах `GET ?target=`) требуют `Authorization: Bearer <token>`; без заголовка — `401`, с неверным — `403`; чтение открыто. Браузер шлёт токен из `VITE_LAB_TOKEN` (тот же токен; **виден в бандле** — годится только для закрытых инстансов, не для публичных URL; в dev он лишь добавляет заголовок — middleware его не проверяет, безвредно).
-- **Пути**: канонические имена на проде — `/api/sync`, `/api/analysis`, `/api/warnings`, `/api/journal`; dev-имена `/api/__sync` и пр. работают через rewrites в `vercel.json` (совместимость curl-цикла; `__sweep` → `/api/sweep`). `/api/state`, `/api/warnings`, `/api/analysis`, `/api/journal`, `/api/schema`, `/api/methodology`, `/api/sweep` (+ `?id=` и `/<id>`), `/api/presets`, `/api/presets/:name`, `/api/sessions`, `/api/sessions/:id` — те же имена, что в dev (sessions — только прод, см. «Сессии» ниже).
+- **Пути**: канонические имена на проде — `/api/sync`, `/api/analysis`, `/api/warnings`, `/api/journal`; dev-имена `/api/__sync` и пр. работают через rewrites в `vercel.json` (совместимость curl-цикла; `__sweep` → `/api/sweep`). `/api/state`, `/api/warnings`, `/api/analysis`, `/api/journal`, `/api/schema`, `/api/methodology`, `/api/sweep` (+ `?id=` и `/<id>`), `/api/notify`, `/api/presets`, `/api/presets/:name`, `/api/sessions`, `/api/sessions/:id` — те же имена, что в dev (sessions — только прод, см. «Сессии» ниже).
 - **Пресеты и журнал** живут в Upstash, а не в файловой системе: `lab:preset:<name>` + индекс `lab:presets`, `lab:journal` (cap 200). Это НЕ локальная папка `presets/` — у прода своё множество пресетов. UI PresetDrawer на проде файловые пресеты не показывает (осознанно: флаг `devApiAvailable` ставится только в dev) — агент работает с ними напрямую через `GET/PUT/DELETE /api/presets/:name`. Форматы записей — те же.
 - **Без env Upstash** любая функция отвечает `503 {"error":"prod API не настроен: ..."}` — приложение при этом живёт как обычная статика (поллинг не поднимается).
 
@@ -319,7 +336,7 @@ curl -X DELETE http://localhost:5180/api/presets/veil
 
 Прод — мульти-сессионный: каждый агент/юзер работает в своём слоте доски, а не в одной общей. Сессия задаётся заголовком **`X-Lab-Session: <id>`**; без заголовка — сессия `default`. id — `[a-zA-Z0-9_-]`, 1..64 символа; невалидный — `400`.
 
-- Заголовок принимают и срезают по нему данные: `/api/state` (GET/PUT), `/api/sync`, `/api/analysis` (GET/POST), `/api/warnings` (GET/POST), `/api/sweep` (заявка/результат/статус `?id=` и `/<id>`). Журнал `/api/journal` — общая лента, заголовок принимается, но лента одна. Пресеты, `/api/schema`, `/api/methodology` — глобальны (без сессии).
+- Заголовок принимают и срезают по нему данные: `/api/state` (GET/PUT), `/api/sync`, `/api/analysis` (GET/POST), `/api/warnings` (GET/POST), `/api/sweep` (заявка/результат/статус `?id=` и `/<id>`), `/api/notify` (запись). Журнал `/api/journal` — общая лента, заголовок принимается, но лента одна. Пресеты, `/api/schema`, `/api/methodology` — глобальны (без сессии).
 - **Ленивое создание**: обращение к несуществующей сессии (включая GET) создаёт слот с пустым стейтом (версия 0) и строкой в индексе. Единственное исключение — `DELETE /api/sessions/<id>` (404). Создание слотов неавторизованными GET-ами возможно: без `LAB_API_TOKEN` ключи `lab:s/*` плодятся от любого запроса с новым заголовком (индекс держит cap 50) — для приватных инстансов ставьте токен.
 - **Изоляция**: стейт/версии/заявки (`analysisReq`/`sweepReq`), warnings, analysis-кэш и sweep-результаты живут в ключах слота `lab:s/<id>*` (таблица ключей ниже); чужой sweep по тому же id не читается — id сессии зашит в ключ результата. Счётчики версий у сессий независимы.
 
@@ -337,7 +354,7 @@ curl -X DELETE http://localhost:5180/api/presets/veil
 
 **dev всегда `default`**: dev-сервер :5180 однопользовательский — селектор в хедере скрыт, браузер заголовок не шлёт (middleware его игнорирует), сессийного слоттинга в dev нет.
 
-Ключи Upstash (слоты сессий — `lab:s/<id>*`, см. «Сессии»): `lab:s/<id>` (JSON `{version, state, analysisReq?, sweepReq?, name, updatedAt}` — стейт-слот с мета-сессии одним ключом), `lab:s/<id>/ver` (счётчик версий слота), `lab:s/<id>/warnings`, `lab:s/<id>/analysis` (JSON с `target`), `lab:s/<id>/sweep/<sweepId>` (JSON `{req, status, results?, aborted?}`), `lab:sessions` (индекс `[{id, name, updatedAt}]`, cap 50), `lab:journal` (общая лента, JSON-массив, cap 200), `lab:presets` + `lab:preset:<name>` (глобальны). Legacy-ключи односессионной эпохи `lab:state`/`lab:statever`/`lab:warnings`/`lab:analysis` мигрируют в слот `default` при первом обращении (разово, RMW).
+Ключи Upstash (слоты сессий — `lab:s/<id>*`, см. «Сессии»): `lab:s/<id>` (JSON `{version, state, analysisReq?, sweepReq?, notify?, name, updatedAt}` — стейт-слот с мета-сессии одним ключом), `lab:s/<id>/ver` (счётчик версий слота), `lab:s/<id>/warnings`, `lab:s/<id>/analysis` (JSON с `target`), `lab:s/<id>/sweep/<sweepId>` (JSON `{req, status, results?, aborted?}`), `lab:sessions` (индекс `[{id, name, updatedAt}]`, cap 50), `lab:journal` (общая лента, JSON-массив, cap 200), `lab:presets` + `lab:preset:<name>` (глобальны). Legacy-ключи односессионной эпохи `lab:state`/`lab:statever`/`lab:warnings`/`lab:analysis` мигрируют в слот `default` при первом обращении (разово, RMW).
 
 ### Квота и честные ограничения
 
@@ -362,7 +379,23 @@ curl -X DELETE http://localhost:5180/api/presets/veil
     "x": 120,
     "y": 96,
     "radius": 24,
-    "base": { "kind": "color", "color": "#101010", "gradient": { "type": "linear", "angle": 90, "repeating": false, "stops": [{ "id": "b1", "pos": 0, "color": "#101010", "alpha": 1 }, { "id": "b2", "pos": 100, "color": "#101010", "alpha": 0 }] }, "image": null, "fit": "cover", "posX": 50, "posY": 50 },
+    "base": {
+        "kind": "color",
+        "color": "#101010",
+        "gradient": {
+            "type": "linear",
+            "angle": 90,
+            "repeating": false,
+            "stops": [
+                { "id": "b1", "pos": 0, "color": "#101010", "alpha": 1 },
+                { "id": "b2", "pos": 100, "color": "#101010", "alpha": 0 }
+            ]
+        },
+        "image": null,
+        "fit": "cover",
+        "posX": 50,
+        "posY": 50
+    },
     "layers": [
         {
             "id": "l1",
@@ -392,7 +425,20 @@ curl -X DELETE http://localhost:5180/api/presets/veil
             ]
         }
     },
-    "blur": { "enabled": false, "radius": 24, "background": null, "gradient": null, "mask": null, "rect": { "x": 0, "y": 0, "w": 100, "h": 100 }, "underlay": { "enabled": false, "rect": { "x": 0, "y": 0, "w": 100, "h": 100 }, "color": null, "gradient": null } },
+    "blur": {
+        "enabled": false,
+        "radius": 24,
+        "background": null,
+        "gradient": null,
+        "mask": null,
+        "rect": { "x": 0, "y": 0, "w": 100, "h": 100 },
+        "underlay": {
+            "enabled": false,
+            "rect": { "x": 0, "y": 0, "w": 100, "h": 100 },
+            "color": null,
+            "gradient": null
+        }
+    },
     "blockBlend": "normal",
     "clipText": {
         "enabled": false,
@@ -410,11 +456,45 @@ curl -X DELETE http://localhost:5180/api/presets/veil
     "anim": {
         "enabled": false,
         "duration": 400,
-        "from": { "type": "linear", "angle": 0, "repeating": false, "stops": [{ "id": "f1", "pos": 0, "color": "#000000", "alpha": 1 }, { "id": "f2", "pos": 100, "color": "#000000", "alpha": 0 }] },
-        "to": { "type": "linear", "angle": 0, "repeating": false, "stops": [{ "id": "g1", "pos": 0, "color": "#000000", "alpha": 1 }, { "id": "g2", "pos": 100, "color": "#000000", "alpha": 0 }] }
+        "from": {
+            "type": "linear",
+            "angle": 0,
+            "repeating": false,
+            "stops": [
+                { "id": "f1", "pos": 0, "color": "#000000", "alpha": 1 },
+                { "id": "f2", "pos": 100, "color": "#000000", "alpha": 0 }
+            ]
+        },
+        "to": {
+            "type": "linear",
+            "angle": 0,
+            "repeating": false,
+            "stops": [
+                { "id": "g1", "pos": 0, "color": "#000000", "alpha": 1 },
+                { "id": "g2", "pos": 100, "color": "#000000", "alpha": 0 }
+            ]
+        }
     },
-    "compare": { "refImage": null, "mode": "off", "opacity": 0.5, "x": 0, "y": 0, "scale": 1, "splitPos": 50, "splitDir": "vertical", "tolerance": 10 },
-    "stage": { "bg": "checker", "color": "#141416", "image": null, "x": 0, "y": 0, "scale": 100, "isolated": true },
+    "compare": {
+        "refImage": null,
+        "mode": "off",
+        "opacity": 0.5,
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "splitPos": 50,
+        "splitDir": "vertical",
+        "tolerance": 10
+    },
+    "stage": {
+        "bg": "checker",
+        "color": "#141416",
+        "image": null,
+        "x": 0,
+        "y": 0,
+        "scale": 100,
+        "isolated": true
+    },
     "export": { "scale": 2, "remBase": 10, "designWidth": 1440 }
 }
 ```
@@ -424,9 +504,9 @@ curl -X DELETE http://localhost:5180/api/presets/veil
 - `pos` стопов может выходить за `0..100` (напр. `-13.94` — приём из onsport select).
 - `layers[].rect` — область слоя `{ x, y, w, h }` в % ОТ блока, та же семантика, что `blur.rect`: `x`/`y` могут выходить за `0..100` (области затекания), `w`/`h` >= 1, дефолт `{0,0,100,100}` (zod-`.default()` — старые стейты без поля валидны). Экспорт-семантика: полный rect → `inset: 0`, неполный → 4 декларации `left/top/width/height` в % ОТДЕЛЬНЫМИ строками (в indented Sass запятые превратили бы их в мусорный список). Геометрия градиента слоя (угол оси linear, центр/радиусы radial) считается в системе rect — CSS считает градиент от border-box элемента; ось анализа `layer:N` тоже (`axisSpace: "layer.rect"`), `zone` = rect слоя. В UI у активного rect-таргета (слой/blur/underlay) есть хэндлы на канвасе: drag внутри контура — перенос (при ЛЮБОМ rect, включая полный 100%), углы — ресайз (Shift — пропорциональный), значения без clamp, над контуром чип-подпись таргета. Активный таргет главнее блока: пока rect-таргет активен, drag/углы внутри его контура двигают таргет, а не блок — блок переносится через Alt+drag, ресайзится через Alt+углы или полями X/Y/W/H инспектора; вне контура (частичный rect) блок двигается как обычно, без Alt.
 - `blur` — это ОДИН псевдоэлемент ОГРАНИЧЕННОЙ области внутри блока, несущий ВМЕСТЕ градиентный фон (`blur.gradient`) + `backdrop-filter: blur()` + маску (`blur.mask`). Не раскладывай на разные слои. `blur.rect` — `{ x, y, w, h }` в % ОТ блока; `x`/`y` могут выходить за `0..100` (области затекания часто заходят за край), `w`/`h` >= 1; дефолт `{0,0,100,100}`. В экспорте это один класс `.gradient-block__blur` с `left/top/width/height` в %. Легаси `background` (плоский rgba-цвет) используется только когда `gradient === null` (`gradient ?? background`); в инспекторе выбор подложки «Нет | Цвет | Градиент». Поля `gradient`/`rect`/`underlay` имеют zod-дефолты — старые стейты без них остаются валидными.
-- `blur.underlay` — подложка затемнения ПОД blur-элементом (порядок слоёв: base → layers → underlay → blur; в проекте это конструкция «::before затемнение + ::after blur», в экспорте лаборатории — класс `.gradient-block__blur-underlay` ПОД `.gradient-block__blur`). Без маски и блюра, со своей `rect` (`{x,y,w,h}` в % от блока) и заливкой `gradient ?? color` (цвет — rgba-строка). Дефолт выключен; включается, когда чистого `blur.gradient` не хватает — утверждено фронт-лидом для плотных затемнений под каруселями.
+- `blur.underlay` — подложка затемнения ПОД blur-элементом (порядок слоёв: base → layers → underlay → blur; в проекте это конструкция «::before затемнение + ::after blur», в экспорте лаборатории — класс `.gradient-block__blur-underlay` ПОД `.gradient-block__blur`). Без маски и блюра, со своей `rect` (`{x,y,w,h}` в % от блока) и заливкой `gradient ?? color` (цвет — rgba-строка). Дефолт выключен; включается, когда чистого `blur.gradient` не хватает — для плотных затемнений под каруселями.
 - `compare.mode`: `"off" | "opacity" | "difference" | "split" | "analysis"`. `split` — A/B-разделитель блока, ось задаётся `splitDir`: `"vertical"` (линия двигается влево/вправо, клип `inset(0 0 0 splitPos%)`) или `"horizontal"` (вниз/вверх, `inset(splitPos% 0 0 0)`). `analysis` — heat-карта попиксельных расхождений (чёрный = совпадение в пределах `tolerance`); метрики см. `GET /api/analysis`. `splitDir`/`tolerance` имеют дефолты (`"vertical"`/`10`).
-- `base.kind`: `"color" | "gradient" | "image"`; при `"gradient"` фон блока — `background: <gradient>` из `base.gradient` (поле обязательно при любом kind; в Sass-экспорте выносится в `$g-base`).
+- `base.kind`: `"color" | "gradient" | "image"`; при `"gradient"` фон блока — `background: <gradient>` из `base.gradient` (поле обязательно при любом kind; в Sass-экспорте выносится в `$g-base`). При `"image"` тот же `base.gradient` — **вуаль поверх картинки**: превью — отдельный слой над `<img>`, экспорт — multiple backgrounds `background-image: <gradient>, url("...")` с градиентом ПЕРВЫМ слоем (в Sass — переменная `$g-veil`); alpha-профиль решает видимость — все α=0 дают невидимую (но корректную) вуаль, дефолт — чёрная наполовину с растворением к низу. Дифф-анализ вуаль учитывает.
 - `radial`-градиент: `{ "type": "radial", "cx", "cy", "shape": "circle|ellipse", "size": "closest-side|closest-corner|farthest-side|farthest-corner|explicit", "rx", "ry", "repeating", "stops" }`; при `size: "explicit"` рендерится как `ellipse Rx% Ry% at Cx% Cy%`.
 - `stage.bg`: `"checker" | "solid" | "image"` — три режима фона стейджа. При `"image"` под блоком рендерится `stage.image` (dataURL) со смещением `x`/`y` (px) и масштабом `scale` (%) от натурального размера — чтобы честно проверять backdrop-blur и blend-режимы блока поверх реального контента (скриншота страницы/слайдера). Поля `image`/`x`/`y`/`scale`/`isolated` имеют zod-дефолты (`null`/`0`/`0`/`100`/`true`) — старые стейты без них остаются валидными.
 - `stage.isolated` (default `true`): блок — backdrop root (`isolation: isolate` в превью и экспорте). В реальном браузере родитель с isolation клипает сэмпл блюра: backdrop-filter блюрит только содержимое блока. Канва анализа при `true` за краем блока сэмплирует копии краевых пикселей (clamp-to-edge вместо прозрачности) — got у кромки честный, edge-residual исчезает при rect до края. Выключайте, чтобы в превью blur блюрил картинку стейджа за блоком.

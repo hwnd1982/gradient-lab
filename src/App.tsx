@@ -91,11 +91,20 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
         // защита от эха: строка последнего отправленного POST /api/__sync
         let lastSyncJson = '';
         let timer: number | undefined;
+        // состояние тоста agentNote — ОБЩЕЕ для прод и dev веток ниже (объявлено
+        // до ветвления: в прод-бандле код после веток выпадает как unreachable,
+        // объявления внизу не исполняются и ссылки из прод-ветки падали бы TDZ)
+        let burstPaths: string[] = [];
+        let showTimer: number | undefined;
+        let hideTimer: number | undefined;
 
         if (!import.meta.env.DEV) {
             // ── прод: поллинг версий (транспорт — src/lib/agentTransport.ts) ──
             // версия, которую браузер уже видел (свой синк подтягивает её сразу)
             let lastKnownVersion = 0;
+            // ts последнего показанного notify (полл возвращает его всегда —
+            // показываем только новее; сообщения не перезапрашиваются)
+            let lastSeenNotifyTs = 0;
             // первую выдачу не затираем, если стейт пришёл из share-ссылки
             let firstPoll = true;
             let pollTimer: number | undefined;
@@ -198,6 +207,16 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                     // useSweepSync; повторные доставки того же id — no-op в сторе
                     useLabStore.getState().requestSweep(res.sweepRequest);
                 }
+                if (res.notify !== undefined && res.notify.ts > lastSeenNotifyTs) {
+                    // сообщение агента (POST /api/notify): тост тем же механизмом
+                    // agentNote (префикс «Агент:»); повторные доставки того же
+                    // ts молча пропускаются
+                    lastSeenNotifyTs = res.notify.ts;
+                    window.clearTimeout(showTimer);
+                    window.clearTimeout(hideTimer);
+                    setAgentNote(`Агент: ${res.notify.text}`);
+                    hideTimer = window.setTimeout(() => setAgentNote(null), 4000);
+                }
                 if (res.version !== undefined && res.version > lastKnownVersion) {
                     if (res.state !== undefined && !res.unchanged) {
                         if (firstPoll && hashLoadedRef.current) {
@@ -266,9 +285,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             }, 300);
         });
 
-        let burstPaths: string[] = [];
-        let showTimer: number | undefined;
-        let hideTimer: number | undefined;
+        // burstPaths/showTimer/hideTimer объявлены в общей области эффекта выше
         let es: EventSource | null = null;
         // стейт из share-ссылки уже применён — первое SSE-событие после
         // подключения (initial-кэш сервера) не должно его затирать;
@@ -284,6 +301,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                     target?: unknown;
                     id?: unknown;
                     req?: unknown;
+                    text?: unknown;
                 };
                 try {
                     msg = JSON.parse(ev.data);
@@ -309,6 +327,17 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                         if (parsed.success) {
                             useLabStore.getState().requestSweep({ id: msg.id, req: parsed.data });
                         }
+                    }
+                    return;
+                }
+                // сообщение агента юзеру (POST /api/notify): тост напрямую,
+                // хранить не нужно (dev — одно окно, доставлено мгновенно)
+                if (msg.type === 'notify') {
+                    if (typeof msg.text === 'string' && msg.text !== '') {
+                        window.clearTimeout(showTimer);
+                        window.clearTimeout(hideTimer);
+                        setAgentNote(`Агент: ${msg.text}`);
+                        hideTimer = window.setTimeout(() => setAgentNote(null), 4000);
                     }
                     return;
                 }

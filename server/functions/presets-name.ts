@@ -1,11 +1,5 @@
 import { K, configured, kvDelete, kvReadJson, kvWriteJson, notConfigured } from '../kv.ts';
-import {
-    json,
-    parseStateBody,
-    readJsonBody,
-    requireMutationAuth,
-    route,
-} from '../rest.ts';
+import { json, parseStateBody, readJsonBody, requireMutationAuth, route } from '../rest.ts';
 import { sanitizeName } from '../../shared/targetKeys.ts';
 
 /** Имя пресета: прод-роутер принимает /api/presets/:name через rewrite

@@ -11,7 +11,7 @@ interface BlockBoxProps {
 /** Фаза цикла проигрывания анимации маски. */
 type AnimPhase = 'from' | 'to';
 
-/** Визуал блока: base (цвет/img) -> градиентные слои -> underlay -> blur-слой (как в экспорте); clip-text вместо base. */
+/** Визуал блока: base (цвет/img + вуаль градиента) -> градиентные слои -> underlay -> blur-слой (как в экспорте); clip-text вместо base. */
 export function BlockBox({ onPointerDown }: BlockBoxProps) {
     const state = useLabStore((s) => s.state);
     const animPlaying = useLabStore((s) => s.animPlaying);
@@ -105,21 +105,25 @@ export function BlockBox({ onPointerDown }: BlockBoxProps) {
                     {clip.text}
                 </div>
             ) : (
-                preview.baseImage && (
-                    <img
-                        src={preview.baseImage.src}
-                        alt=""
-                        draggable={false}
-                        style={{
-                            position: 'absolute',
-                            inset: 0,
-                            width: '100%',
-                            height: '100%',
-                            objectFit: preview.baseImage.fit,
-                            objectPosition: `${preview.baseImage.posX}% ${preview.baseImage.posY}%`,
-                        }}
-                    />
-                )
+                <>
+                    {preview.baseImage && (
+                        <img
+                            src={preview.baseImage.src}
+                            alt=""
+                            draggable={false}
+                            style={{
+                                position: 'absolute',
+                                inset: 0,
+                                width: '100%',
+                                height: '100%',
+                                objectFit: preview.baseImage.fit,
+                                objectPosition: `${preview.baseImage.posX}% ${preview.baseImage.posY}%`,
+                            }}
+                        />
+                    )}
+                    {/* вуаль базового градиента поверх картинки (экспорт — multiple backgrounds) */}
+                    {preview.baseVeil && <div style={preview.baseVeil} />}
+                </>
             )}
             {state.layers.map(
                 (layer, i) => layer.visible && <div key={layer.id} style={preview.layers[i]} />

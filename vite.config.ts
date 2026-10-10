@@ -1,7 +1,7 @@
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-import { defineConfig } from 'vite'
-import { agentApi } from './vite-plugins/agent-api.ts'
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+import { defineConfig } from 'vite';
+import { agentApi } from './vite-plugins/agent-api.ts';
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -10,4 +10,4 @@ export default defineConfig({
         port: 5180,
         host: true,
     },
-})
+});

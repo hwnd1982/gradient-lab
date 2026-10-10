@@ -7,6 +7,7 @@
 import * as analysis from './analysis.ts';
 import * as journal from './journal.ts';
 import * as methodology from './methodology.ts';
+import * as notify from './notify.ts';
 import * as ping from './ping.ts';
 import * as presets from './presets.ts';
 import * as presetsName from './presets-name.ts';
@@ -24,7 +25,9 @@ const MISMATCH = (method: string): Response =>
     json(405, { error: `метод ${method} не поддерживается` });
 
 export async function fetch(req: Request): Promise<Response> {
-    const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
+    const segments = new URL(req.url, 'http://localhost').pathname
+        .replace(/^\/+|\/+$/g, '')
+        .split('/');
     const resource = segments[1] ?? '';
     const hasParam = segments.length > 2;
     const m = req.method;
@@ -66,6 +69,8 @@ export async function fetch(req: Request): Promise<Response> {
             return hasParam ? sweepId.GET(req) : sweep.GET(req);
         case 'POST sweep':
             return sweep.POST(req);
+        case 'POST notify':
+            return notify.POST(req);
         case 'GET sessions':
             return sessions.GET();
         case 'PUT sessions':

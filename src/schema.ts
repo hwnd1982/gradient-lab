@@ -549,10 +549,9 @@ export function defaultBlockState(): BlockState {
         base: {
             kind: 'color',
             color: '#101010',
-            // дефолт-вуаль: чёрная наполовину, ниже — растворяется (для kind='image')
+            // вуаль выключена по умолчанию (α0): включается подъёмом альф
             gradient: defaultLinearGradient(180, [
-                { id: uid(), pos: 0, color: '#101010', alpha: 1 },
-                { id: uid(), pos: 50, color: '#101010', alpha: 1 },
+                { id: uid(), pos: 0, color: '#101010', alpha: 0 },
                 { id: uid(), pos: 100, color: '#101010', alpha: 0 },
             ]),
             image: null,

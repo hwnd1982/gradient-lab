@@ -7410,13 +7410,11 @@ async function POST(req) {
 * Логика живёт в соседних модулях — этот файл только диспетчер.
 * Именованные GET/POST/PUT/DELETE — конвенция рантайма Vercel (Web-стиль).
 */
-const MISMATCH = (method) => json(405, { error: `метод ${method} не поддерживается` });
 async function fetch$1(req) {
 	const segments = new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/");
 	const resource = segments[1] ?? "";
 	const hasParam = segments.length > 2;
-	const m = req.method;
-	switch (`${m} ${resource}`) {
+	switch (`${req.method} ${resource}`) {
 		case "GET ping": return GET$8();
 		case "GET methodology": return GET$9();
 		case "GET schema": return GET$5();
@@ -7430,7 +7428,7 @@ async function fetch$1(req) {
 		case "GET journal": return GET$10(req);
 		case "POST journal": return POST$4(req);
 		case "DELETE journal": return DELETE$2(req);
-		case "GET presets": return hasParam ? GET$6(req) : GET$7();
+		case "GET presets": return new URL(req.url, "http://localhost").searchParams.has("name") ? GET$6(req) : GET$7();
 		case "PUT presets": return PUT$2(req);
 		case "DELETE presets": return DELETE$1(req);
 		case "GET sweep": return hasParam ? GET$1(req) : GET$2(req);
@@ -7439,7 +7437,7 @@ async function fetch$1(req) {
 		case "GET sessions": return GET$4();
 		case "PUT sessions": return PUT$1(req);
 		case "DELETE sessions": return DELETE(req);
-		default: return MISMATCH(m);
+		default: return json(404, { error: `не существует: /api/${resource}` });
 	}
 }
 //#endregion

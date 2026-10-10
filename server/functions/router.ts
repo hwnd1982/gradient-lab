@@ -21,9 +21,6 @@ import * as sync from './sync.ts';
 import * as warnings from './warnings.ts';
 import { json } from '../rest.ts';
 
-const MISMATCH = (method: string): Response =>
-    json(405, { error: `метод ${method} не поддерживается` });
-
 export async function fetch(req: Request): Promise<Response> {
     const segments = new URL(req.url, 'http://localhost').pathname
         .replace(/^\/+|\/+$/g, '')
@@ -60,7 +57,10 @@ export async function fetch(req: Request): Promise<Response> {
         case 'DELETE journal':
             return journal.DELETE(req);
         case 'GET presets':
-            return hasParam ? presetsName.GET(req) : presets.GET();
+            // ?name= (прод-rewrite) → один пресет; без name → список
+            return new URL(req.url, 'http://localhost').searchParams.has('name')
+                ? presetsName.GET(req)
+                : presets.GET();
         case 'PUT presets':
             return presetsName.PUT(req);
         case 'DELETE presets':
@@ -78,6 +78,8 @@ export async function fetch(req: Request): Promise<Response> {
         case 'DELETE sessions':
             return sessionsId.DELETE(req);
         default:
-            return MISMATCH(m);
+            // неизвестный ресурс — 404 «не существует»; 405 оставлен для
+            // известных ресурсов с неподдерживаемым методом
+            return json(404, { error: `не существует: /api/${resource}` });
     }
 }

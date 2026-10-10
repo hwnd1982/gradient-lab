@@ -270,9 +270,10 @@ export function stateToPreview(state: BlockState): PreviewResult {
             : null;
 
     // вуаль: base.gradient применяется и при kind='image' — градиентом поверх
-    // картинки (в экспорте — первым слоем multiple backgrounds)
+    // картинки (в экспорте — первым слоем multiple backgrounds); без самой
+    // картинки вуаль не рисуем (превью/экспорт/дифф едины)
     const baseVeil: CSSProperties | null =
-        state.base.kind === 'image'
+        state.base.kind === 'image' && state.base.image
             ? { position: 'absolute', inset: 0, background: gradientToCss(state.base.gradient) }
             : null;
 

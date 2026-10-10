@@ -181,7 +181,11 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                     arm(); // вкладка скрыта — не запрашиваем, ждём visibilitychange
                     return;
                 }
+                const pollSession = currentSession();
                 const res = await pollState(lastKnownVersion);
+                // за время запроса сессию переключили — ответ чужого слота
+                // целиком игнорируем (не применяем стейт/notify/заявки)
+                if (currentSession() !== pollSession) return;
                 if (res === null) {
                     failures += 1; // сеть — тоже неудачный тик, бэкоффим
                     arm();

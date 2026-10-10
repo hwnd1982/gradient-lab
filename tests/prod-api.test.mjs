@@ -379,9 +379,7 @@ const analysis = AnalysisSchema.parse({
             g1.json.results[1].zoneMatchPercent === 98.4
     );
     const g2 = await body(
-        await sweepIdApi.GET(req('GET', `https://x/api/sweep/${id}`), {
-            params: Promise.resolve({ id }),
-        })
+        await sweepIdApi.GET(req('GET', `https://x/api/sweep?id=${id}`))
     );
     check(
         'GET /<id>: тот же ответ',
@@ -463,9 +461,7 @@ const analysis = AnalysisSchema.parse({
         'GET /<id> битый id: 400',
         (
             await body(
-                await sweepIdApi.GET(req('GET', 'https://x/api/sweep/%zz'), {
-                    params: Promise.resolve({ id: '%zz' }),
-                })
+                await sweepIdApi.GET(req('GET', 'https://x/api/sweep?id=%zz'))
             )
         ).status === 400
     );
@@ -557,23 +553,23 @@ const analysis = AnalysisSchema.parse({
     const g0 = await body(await presetsApi.GET());
     check('presets: пустой индекс → {files:[]}', g0.status === 200 && g0.json.files.length === 0);
 
-    const p1 = await body(await presetApi.PUT(req('PUT', 'https://x/api/presets/veil', state)));
+    const p1 = await body(await presetApi.PUT(req('PUT', 'https://x/api/presets?name=veil', state)));
     check('presets PUT veil: {ok, name}', p1.status === 200 && p1.json.name === 'veil');
     const p2 = await body(
-        await presetApi.PUT(req('PUT', 'https://x/api/presets/My%20Preset%21.json', state))
+        await presetApi.PUT(req('PUT', 'https://x/api/presets?name=My%20Preset%21.json', state))
     );
     check(
         'presets PUT "My Preset!.json" → санитизация My-Preset',
         p2.status === 200 && p2.json.name === 'My-Preset'
     );
     const p3 = await body(
-        await presetApi.PUT(req('PUT', 'https://x/api/presets/%D0%BC%D0%BE%D0%B9', state))
+        await presetApi.PUT(req('PUT', 'https://x/api/presets?name=%D0%BC%D0%BE%D0%B9', state))
     );
     check('presets PUT кириллица → 400 (имя пусто после санитизации)', p3.status === 400);
-    const p4 = await body(await presetApi.PUT(req('PUT', 'https://x/api/presets/%zz', state)));
+    const p4 = await body(await presetApi.PUT(req('PUT', 'https://x/api/presets?name=%zz', state)));
     check('presets PUT %zz → 400 (битая %-последовательность)', p4.status === 400);
     const bad = await body(
-        await presetApi.PUT(req('PUT', 'https://x/api/presets/broken', { ...state, h: null }))
+        await presetApi.PUT(req('PUT', 'https://x/api/presets?name=broken', { ...state, h: null }))
     );
     check('presets PUT невалидный стейт: 400', bad.status === 400);
 
@@ -587,18 +583,18 @@ const analysis = AnalysisSchema.parse({
     );
     check(
         'presets: GET конкретного отдаёт стейт',
-        (await body(await presetApi.GET(req('GET', 'https://x/api/presets/veil')))).status === 200
+        (await body(await presetApi.GET(req('GET', 'https://x/api/presets?name=veil')))).status === 200
     );
     check(
         'presets: GET несуществующего — 404',
-        (await body(await presetApi.GET(req('GET', 'https://x/api/presets/nope')))).status === 404
+        (await body(await presetApi.GET(req('GET', 'https://x/api/presets?name=nope')))).status === 404
     );
 
-    const d1 = await body(await presetApi.DELETE(req('DELETE', 'https://x/api/presets/veil')));
+    const d1 = await body(await presetApi.DELETE(req('DELETE', 'https://x/api/presets?name=veil')));
     check('presets DELETE: 200', d1.status === 200 && d1.json.name === 'veil');
     check(
         'presets DELETE повторно: 404',
-        (await body(await presetApi.DELETE(req('DELETE', 'https://x/api/presets/veil')))).status ===
+        (await body(await presetApi.DELETE(req('DELETE', 'https://x/api/presets?name=veil')))).status ===
             404
     );
     const list2 = await body(await presetsApi.GET());
@@ -741,9 +737,7 @@ const analysis = AnalysisSchema.parse({
         await sweepApi.GET(req('GET', `https://x/api/sweep?id=${sid}`, undefined, H('beta')))
     );
     const fromBetaPath = await body(
-        await sweepIdApi.GET(req('GET', `https://x/api/sweep/${sid}`, undefined, H('beta')), {
-            params: Promise.resolve({ id: sid }),
-        })
+        await sweepIdApi.GET(req('GET', `https://x/api/sweep?id=${sid}`, undefined, H('beta')))
     );
     check(
         'сессии: чужой sweep не читается (?id= и /<id>) — 404',
@@ -798,11 +792,9 @@ const analysis = AnalysisSchema.parse({
             list0.json.sessions.some((e) => e.id === 'beta') &&
             list0.json.sessions.some((e) => e.id === 'ghost')
     );
-    const ctxId = (id) => ({ params: Promise.resolve({ id }) });
     const ren = await body(
         await sessionsIdApi.PUT(
-            req('PUT', 'https://x/api/sessions/alpha', { name: 'Карусель heroes' }),
-            ctxId('alpha')
+            req('PUT', 'https://x/api/sessions?id=alpha', { name: 'Карусель heroes' })
         )
     );
     check('сессии: PUT rename — 200 {id, name}', ren.status === 200 && ren.json.name === 'Карусель heroes');
@@ -814,21 +806,18 @@ const analysis = AnalysisSchema.parse({
     );
     const badPut = await body(
         await sessionsIdApi.PUT(
-            req('PUT', 'https://x/api/sessions/ok-id', { name: '' }),
-            ctxId('ok-id')
+            req('PUT', 'https://x/api/sessions?id=ok-id', { name: '' })
         )
     );
     check('сессии: PUT пустое имя — 400', badPut.status === 400);
     const badId = await body(
-        await sessionsIdApi.PUT(req('PUT', 'https://x/api/sessions/%zz', { name: 'x' }), {
-            params: Promise.resolve({ id: '%zz' }),
-        })
+        await sessionsIdApi.PUT(req('PUT', 'https://x/api/sessions?id=%zz', { name: 'x' }))
     );
     check('сессии: PUT невалидный id — 400', badId.status === 400);
 
     // DELETE: слот целиком, повтор — 404, индекс чистеет
     const del = await body(
-        await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions/alpha'), ctxId('alpha'))
+        await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions?id=alpha'))
     );
     check('сессии: DELETE — 200 {ok, id}', del.status === 200 && del.json.ok === true && del.json.id === 'alpha');
     check(
@@ -840,7 +829,7 @@ const analysis = AnalysisSchema.parse({
     );
     check(
         'сессии: повторный DELETE — 404',
-        (await body(await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions/alpha'), ctxId('alpha')))).status === 404
+        (await body(await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions?id=x1')))).status === 404
     );
     const list2 = await body(await sessionsApi.GET());
     check('сессии: индекс после DELETE без alpha', !list2.json.sessions.some((e) => e.id === 'alpha'));
@@ -849,16 +838,15 @@ const analysis = AnalysisSchema.parse({
     process.env.LAB_API_TOKEN = 'secret';
     check(
         'сессии: PUT без токена — 401',
-        (await body(await sessionsIdApi.PUT(req('PUT', 'https://x/api/sessions/x1', { name: 'x' }), ctxId('x1')))).status === 401
+        (await body(await sessionsIdApi.PUT(req('PUT', 'https://x/api/sessions?id=x1')))).status === 401
     );
     check(
         'сессии: DELETE без токена — 401',
-        (await body(await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions/x1'), ctxId('x1')))).status === 401
+        (await body(await sessionsIdApi.DELETE(req('DELETE', 'https://x/api/sessions?id=x1')))).status === 401
     );
     const okRen = await body(
         await sessionsIdApi.PUT(
-            req('PUT', 'https://x/api/sessions/x1', { name: 'x' }, { Authorization: 'Bearer secret' }),
-            ctxId('x1')
+            req('PUT', 'https://x/api/sessions?id=x1', { name: 'x' }, { Authorization: 'Bearer secret' })
         )
     );
     check('сессии: PUT с токеном — 200', okRen.status === 200);

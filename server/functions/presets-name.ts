@@ -8,10 +8,10 @@ import {
 } from '../rest.ts';
 import { sanitizeName } from '../../shared/targetKeys.ts';
 
-/** Имя пресета из пути /api/presets/<name> (сегмент после /presets/). */
+/** Имя пресета: прод-роутер принимает /api/presets/:name через rewrite
+ *  в query (?name=...); путь целиком не матчится (лимит [[...path]]). */
 function presetNameFromUrl(req: Request): string {
-    const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
-    return segments[2] ?? '';
+    return new URL(req.url, 'http://localhost').searchParams.get('name') ?? '';
 }
 
 /** GET /api/presets/:name — один пресет (санитизация имени как в dev). */

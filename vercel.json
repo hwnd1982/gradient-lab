@@ -4,10 +4,37 @@
     "buildCommand": "npm run build",
     "outputDirectory": "dist",
     "rewrites": [
-        { "source": "/api/__sync", "destination": "/api/sync" },
-        { "source": "/api/__analysis", "destination": "/api/analysis" },
-        { "source": "/api/__warnings", "destination": "/api/warnings" },
-        { "source": "/api/__journal", "destination": "/api/journal" },
-        { "source": "/api/__sweep", "destination": "/api/sweep" }
+        {
+            "source": "/api/__sync",
+            "destination": "/api/sync"
+        },
+        {
+            "source": "/api/__analysis",
+            "destination": "/api/analysis"
+        },
+        {
+            "source": "/api/__warnings",
+            "destination": "/api/warnings"
+        },
+        {
+            "source": "/api/__journal",
+            "destination": "/api/journal"
+        },
+        {
+            "source": "/api/__sweep",
+            "destination": "/api/sweep"
+        },
+        {
+            "source": "/api/presets/:name",
+            "destination": "/api/presets?name=:name"
+        },
+        {
+            "source": "/api/sessions/:id",
+            "destination": "/api/sessions?id=:id"
+        },
+        {
+            "source": "/api/sweep/:id",
+            "destination": "/api/sweep?id=:id"
+        }
     ]
 }

@@ -9,10 +9,10 @@ import {
     SESSION_ID_RE,
 } from '../rest.ts';
 
-/** id из пути /api/sessions/<id> (catch-all роутер). */
+/** id сессии: прод-роутер принимает /api/sessions/:id через rewrite в query
+ *  (?id=...); путь глубже одного сегмента [[...path]] не матчится. */
 function sessionIdFromUrl(req: Request): string {
-    const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
-    return segments[2] ?? '';
+    return new URL(req.url, 'http://localhost').searchParams.get('id') ?? '';
 }
 
 /** id с валидацией; невалидный — HttpError 400 (формат как у X-Lab-Session). */

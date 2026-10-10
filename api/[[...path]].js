@@ -6957,9 +6957,10 @@ async function GET$7() {
 }
 //#endregion
 //#region server/functions/presets-name.ts
-/** Имя пресета из пути /api/presets/<name> (сегмент после /presets/). */
+/** Имя пресета: прод-роутер принимает /api/presets/:name через rewrite
+*  в query (?name=...); путь целиком не матчится (лимит [[...path]]). */
 function presetNameFromUrl(req) {
-	return new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+	return new URL(req.url, "http://localhost").searchParams.get("name") ?? "";
 }
 /** GET /api/presets/:name — один пресет (санитизация имени как в dev). */
 async function GET$6(req) {
@@ -7044,9 +7045,10 @@ async function GET$4() {
 }
 //#endregion
 //#region server/functions/sessions-id.ts
-/** id из пути /api/sessions/<id> (catch-all роутер). */
+/** id сессии: прод-роутер принимает /api/sessions/:id через rewrite в query
+*  (?id=...); путь глубже одного сегмента [[...path]] не матчится. */
 function sessionIdFromUrl(req) {
-	return new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+	return new URL(req.url, "http://localhost").searchParams.get("id") ?? "";
 }
 /** id с валидацией; невалидный — HttpError 400 (формат как у X-Lab-Session). */
 async function sessionId(req) {

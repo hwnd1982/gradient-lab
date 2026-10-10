@@ -6019,11 +6019,13 @@ const AnalysisSchema = object({
 	matchPercent: number(),
 	/** matchPercent, ограниченный зоной эффекта (zone) */
 	zoneMatchPercent: number(),
+	/** true — зона целиком в клипнутом углу (учтённых пикселей в зоне нет) и zoneMatchPercent = глобальному matchPercent */
+	zoneFallback: boolean().optional(),
 	maxError: number(),
 	tolerance: number(),
 	/** таргет, для которого считался анализ (ключ API: base / layer:N / blockMask / …) */
 	target: string(),
-	/** режим профиля: 'axis' — вдоль оси градиента, 'columns' — P60 яркости по оси X, 'rays' — медиана по 16 лучам radial (только radial-таргеты) */
+	/** режим профиля: 'axis' — вдоль оси градиента, 'columns' — P60 яркости по оси X, 'rays' — медиана: 16 лучей из центра (radial) или 8 параллельных линий вдоль оси (linear) */
 	profile: _enum([
 		"axis",
 		"columns",

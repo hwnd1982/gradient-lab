@@ -140,7 +140,7 @@ interface LabStore {
      * на сервер (id/ts/fields/before/after); нужен для computeHint. Cap 50.
      */
     journalEntries: JournalEntry[];
-    /** режим профиля анализа: axis — вдоль оси, columns — P60 колонок, rays — 16 лучей radial */
+    /** режим профиля анализа: axis — вдоль оси, columns — P60 колонок, rays — лучи radial / параллельные линии linear */
     analysisProfile: 'axis' | 'columns' | 'rays';
     /** эффективный канвасный зум стейджа, % (100 = натуральный размер); view-only */
     viewZoom: number;
@@ -293,7 +293,7 @@ export const useLabStore = create<LabStore>()((set, get) => {
         setAnalysisMarker: (m) => set({ analysisMarker: m }),
         // повторный SSE analysis-request того же таргета — no-op: не сбрасываем
         // debounce пересчёта анализа при поллинге агента; смена таргета
-        // сбрасывает профиль в ось (лучи валидны только на radial-таргете)
+        // сбрасывает профиль в ось (лучи/линии — выбор под конкретный таргет)
         setAnalysisTarget: (t) => {
             if (t === null) {
                 set({ analysisTarget: null });

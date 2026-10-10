@@ -13,7 +13,12 @@ import type {
     LinearGradient,
     RadialGradient,
 } from '../types';
-import { sampleAlongLinear, sampleAlongRadial, sampleAlongRadialRays } from './autofit';
+import {
+    sampleAlongLinear,
+    sampleAlongLinearRays,
+    sampleAlongRadial,
+    sampleAlongRadialRays,
+} from './autofit';
 import type { Sample } from './autofit';
 import { parseRgba, rgbToHex, rgbaString } from './color';
 import { getCanvas } from './imageCache';
@@ -24,6 +29,11 @@ const MAX_SIDE = 240;
 const TRANSITION_STEP = 12;
 /** Минимальный зазор между предложенными стопами, %. */
 const MIN_STOP_GAP = 2;
+/**
+ * Порог прозрачности got-пикселя/сэмпла (0..255): блок здесь ничего не
+ * рисует (клип border-radius, blur.rect за краем) — расхождение фиктивно.
+ */
+const GOT_ALPHA_MIN = 8;
 
 interface RectPx {
     x: number;
@@ -392,9 +402,9 @@ function projectRef(
     return ctx.getImageData(0, 0, W, H);
 }
 
-/** Ближайший к pos% семпл по массиву (t — 0..1). */
-function sampleAt(samples: Sample[], pos: number): Sample {
-    let best = samples[0];
+/** Ближайший к pos% семпл по массиву (t — 0..1); null — сэмплов нет вовсе. */
+function sampleAt(samples: Sample[], pos: number): Sample | null {
+    let best: Sample | null = null;
     let bestD = Infinity;
     for (const s of samples) {
         const d = Math.abs(s.t * 100 - pos);
@@ -422,16 +432,17 @@ interface RawStep {
 /**
  * «Ступени» профиля: позиции резкой смены уровня (> TRANSITION_STEP);
  * ступени ближе MIN_STOP_GAP% — шум одной границы, оставляем контрастнее.
- * levels[i] соответствует позиции i / (levels.length - 1) * 100 %.
+ * Позиция берётся из самой точки (t сэмпла), а не из индекса массива —
+ * после исключения позиций полного выбывания лучей/линий сетка неравномерна.
  */
-function detectSteps(levels: number[]): RawStep[] {
+function detectSteps(points: { pos: number; level: number }[]): RawStep[] {
     const steps: RawStep[] = [];
-    for (let i = 1; i < levels.length; i++) {
-        const d = Math.abs(levels[i] - levels[i - 1]);
+    for (let i = 1; i < points.length; i++) {
+        const d = Math.abs(points[i].level - points[i - 1].level);
         if (d <= TRANSITION_STEP) continue;
         const next: RawStep = {
-            pos: round1((i / (levels.length - 1)) * 100),
-            level: round0(levels[i]),
+            pos: round1(points[i].pos),
+            level: round0(points[i].level),
             step: d,
         };
         const prev = steps[steps.length - 1];
@@ -601,11 +612,19 @@ export async function computeAnalysis(
     const zx1 = Math.min(W, Math.ceil(((zone.x + zone.w) / 100) * W));
     const zy1 = Math.min(H, Math.ceil(((zone.y + zone.h) / 100) * H));
     let matched = 0;
+    let accounted = 0;
     let maxError = 0;
     let zoneMatched = 0;
     let zoneTotal = 0;
     for (let i = 0; i < W * H; i++) {
         const j = i * 4;
+        out.data[j + 3] = 255;
+        // прозрачный got (за клипом radius / blur.rect): сравниваем то, что
+        // блок реально рисует — пиксель выпадает из matchPercent/maxError/
+        // зоны, знаменатели считают только учтённые пиксели; в heat-карте
+        // он остаётся чёрным (совпадение)
+        if (gotData.data[j + 3] < GOT_ALPHA_MIN) continue;
+        accounted++;
         const e = pixelErr(
             gotData.data[j] - refData.data[j],
             gotData.data[j + 1] - refData.data[j + 1],
@@ -624,7 +643,6 @@ export async function computeAnalysis(
         out.data[j] = r;
         out.data[j + 1] = g;
         out.data[j + 2] = b;
-        out.data[j + 3] = 255;
     }
     diffCtx?.putImageData(out, 0, 0);
 
@@ -645,7 +663,9 @@ export async function computeAnalysis(
     };
     let refSamples: Sample[] = [];
     let gotSamples: Sample[] = [];
-    const raysProfile = opts.profile === 'rays' && axisGradient?.type === 'radial';
+    // «по лучам»: radial — медиана лучей из центра, linear — медиана
+    // параллельных линий вдоль оси; ось-линия одна и слепа ко всему вне её
+    const raysProfile = opts.profile === 'rays';
     if (axisGradient?.type === 'radial') {
         const radial = {
             cx: axisGradient.cx,
@@ -657,18 +677,23 @@ export async function computeAnalysis(
         };
         if (raysProfile) {
             // профиль по лучам: медиана 16 лучей из центра на нормированном
-            // радиусе — ось-линия слепа к объектам вне линии, лучи видят всю зону
+            // радиусе — ось-линия слепа к объектам вне линии, лучи видят всю
+            // зону; ref-лучи фильтруем по got-маске: где блок не рисует
+            // (клип radius/rect), ref-данные в медиану не идут
             refSamples = sampleAlongRadialRays(refCanvas, {
                 ...common,
                 compare: placement,
                 ...radial,
                 axisBox,
+                dropAlphaBelow: GOT_ALPHA_MIN,
+                alphaMask: got,
             });
             gotSamples = sampleAlongRadialRays(got, {
                 ...common,
                 compare: identity,
                 ...radial,
                 axisBox,
+                dropAlphaBelow: GOT_ALPHA_MIN,
             });
         } else {
             refSamples = sampleAlongRadial(refCanvas, {
@@ -686,13 +711,35 @@ export async function computeAnalysis(
         }
     } else {
         const angle = axisGradient?.type === 'linear' ? axisGradient.angle : 180;
-        refSamples = sampleAlongLinear(refCanvas, {
-            ...common,
-            compare: placement,
-            angle,
-            axisBox,
-        });
-        gotSamples = sampleAlongLinear(got, { ...common, compare: identity, angle, axisBox });
+        if (raysProfile) {
+            // профиль по линиям: медиана 8 параллельных линий вдоль оси со
+            // смещением поперёк зоны — ось-линия часто попадает в неудачное
+            // место фото, медиана линий видит всю зону; ref-линии фильтруем
+            // по got-маске (за клипом блока ref-данные в медиану не идут)
+            refSamples = sampleAlongLinearRays(refCanvas, {
+                ...common,
+                compare: placement,
+                angle,
+                axisBox,
+                dropAlphaBelow: GOT_ALPHA_MIN,
+                alphaMask: got,
+            });
+            gotSamples = sampleAlongLinearRays(got, {
+                ...common,
+                compare: identity,
+                angle,
+                axisBox,
+                dropAlphaBelow: GOT_ALPHA_MIN,
+            });
+        } else {
+            refSamples = sampleAlongLinear(refCanvas, {
+                ...common,
+                compare: placement,
+                angle,
+                axisBox,
+            });
+            gotSamples = sampleAlongLinear(got, { ...common, compare: identity, angle, axisBox });
+        }
     }
 
     const axis: AnalysisAxisPoint[] = [];
@@ -703,11 +750,17 @@ export async function computeAnalysis(
             pos: round1(rs.t * 100),
             ref: [round0(rs.r), round0(rs.g), round0(rs.b), round0(rs.a)],
             got: [round0(gs.r), round0(gs.g), round0(gs.b), round0(gs.a)],
-            err: round1(pixelErr(rs.r - gs.r, rs.g - gs.g, rs.b - gs.b, rs.a - gs.a)),
+            // got-сэмпл за клипом (α < GOT_ALPHA_MIN): позиция выпадает из
+            // остатков — блок здесь ничего не рисует, расхождение фиктивно
+            err:
+                gs.a < GOT_ALPHA_MIN
+                    ? 0
+                    : round1(pixelErr(rs.r - gs.r, rs.g - gs.g, rs.b - gs.b, rs.a - gs.a)),
         });
     }
 
-    // «ступени» референса: уровень = альфа у PNG с прозрачностью, иначе luminance
+    // «ступени» референса: уровень = альфа у PNG с прозрачностью, иначе luminance;
+    // лучи/линии исключают позиции полного выбывания — фантомных a=0 здесь нет
     const maskTarget = isAlphaTarget(target.kind);
     const hasTransparency = refSamples.some((s) => s.a < 250);
     const level = (s: Sample): number =>
@@ -725,7 +778,9 @@ export async function computeAnalysis(
             PROFILE_COUNT,
             axisRect !== undefined ? { x0: zx0, y0: zy0, x1: zx1, y1: zy1 } : undefined
         );
-        const steps = detectSteps(levels);
+        const steps = detectSteps(
+            levels.map((lv, i) => ({ pos: (i / Math.max(1, levels.length - 1)) * 100, level: lv }))
+        );
         transitions = steps.map(({ pos, level: lv }) => ({ pos, level: lv }));
         const positions: number[] = [0];
         for (const tr of transitions) {
@@ -742,7 +797,7 @@ export async function computeAnalysis(
             return { pos, color: rgbToHex(gray, gray, gray) };
         });
     } else {
-        const steps = detectSteps(refSamples.map(level));
+        const steps = detectSteps(refSamples.map((s) => ({ pos: s.t * 100, level: level(s) })));
         transitions = steps.map(({ pos, level: lv }) => ({ pos, level: lv }));
         // предлагаемые стопы: края + позиции ступеней; значения — из референса
         const positions: number[] = [0];
@@ -752,12 +807,13 @@ export async function computeAnalysis(
             }
         }
         positions.push(100);
-        suggestedStops = positions.slice(0, 12).map((pos) => {
+        suggestedStops = positions.slice(0, 12).flatMap((pos): AnalysisSuggestedStop[] => {
             const s = sampleAt(refSamples, pos);
+            if (s === null) return [];
             if (maskTarget || hasTransparency) {
-                return { pos, alpha: round2(level(s) / 255) };
+                return [{ pos, alpha: round2(level(s) / 255) }];
             }
-            return { pos, color: rgbToHex(s.r, s.g, s.b) };
+            return [{ pos, color: rgbToHex(s.r, s.g, s.b) }];
         });
     }
 
@@ -803,18 +859,23 @@ export async function computeAnalysis(
         }
     }
 
-    const matchPercent = round1((matched / (W * H)) * 100);
+    // знаменатель — только учтённые пиксели; полностью прозрачный got —
+    // сравнивать нечего, считаем полным совпадением
+    const matchPercent = accounted > 0 ? round1((matched / accounted) * 100) : 100;
     return {
         data: {
             matchPercent,
             zoneMatchPercent:
                 zoneTotal > 0 ? round1((zoneMatched / zoneTotal) * 100) : matchPercent,
+            // зона целиком в клипнутом углу (zoneTotal = 0): zoneMatchPercent
+            // молча подставляет глобальный matchPercent — помечаем фолбэк
+            ...(zoneTotal > 0 ? {} : { zoneFallback: true }),
             maxError: round0(maxError),
             tolerance,
             target: targetToKey(target),
-            // фактический профиль сэмплирования: 'rays' честен только на
-            // radial-таргете (raysProfile это гарантирует), на linear-таргете
-            // с включённой галкой лучей сэмплирование осевое — и пишем 'axis'
+            // фактический профиль сэмплирования: 'rays' честен на обоих типах
+            // таргета (лучи radial / параллельные линии linear — raysProfile
+            // покрывает оба), иначе осевой или колонковый
             profile: raysProfile ? 'rays' : opts.profile === 'columns' ? 'columns' : 'axis',
             axisSpace,
             zone: {

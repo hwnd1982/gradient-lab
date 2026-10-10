@@ -276,11 +276,13 @@ export const AnalysisSchema = z.object({
     matchPercent: z.number(),
     /** matchPercent, ограниченный зоной эффекта (zone) */
     zoneMatchPercent: z.number(),
+    /** true — зона целиком в клипнутом углу (учтённых пикселей в зоне нет) и zoneMatchPercent = глобальному matchPercent */
+    zoneFallback: z.boolean().optional(),
     maxError: z.number(),
     tolerance: z.number(),
     /** таргет, для которого считался анализ (ключ API: base / layer:N / blockMask / …) */
     target: z.string(),
-    /** режим профиля: 'axis' — вдоль оси градиента, 'columns' — P60 яркости по оси X, 'rays' — медиана по 16 лучам radial (только radial-таргеты) */
+    /** режим профиля: 'axis' — вдоль оси градиента, 'columns' — P60 яркости по оси X, 'rays' — медиана: 16 лучей из центра (radial) или 8 параллельных линий вдоль оси (linear) */
     profile: z.enum(['axis', 'columns', 'rays']),
     /** пространство координат оси: блок или rect-область эффекта (blur/underlay/слой) */
     axisSpace: z.enum(['block', 'blur.rect', 'underlay.rect', 'layer.rect']),

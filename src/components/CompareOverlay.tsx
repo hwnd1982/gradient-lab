@@ -216,6 +216,11 @@ export function CompareOverlay({ stageRef }: CompareOverlayProps) {
         // при x=0, y=0, scale=1 референс лежит ровно на блоке
         transform: `translate(${compare.x}px, ${compare.y}px) scale(${compare.scale})`,
         transformOrigin: 'center',
+        // референс клипается по скруглению блока: углы оверлея совпадают с
+        // блоком, кривой кроп углами референса не подсвечивается; transform
+        // scale домножает радиус визуально (radius·compare.scale), как у блока
+        borderRadius: state.radius > 0 ? state.radius : undefined,
+        overflow: 'hidden',
         pointerEvents: interactive && !viewSpace ? 'auto' : 'none',
         cursor: compareUI.dragRef ? 'move' : 'crosshair',
         touchAction: 'none',

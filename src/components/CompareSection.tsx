@@ -52,9 +52,6 @@ export function CompareSection() {
     const analysisTarget = useLabStore((s) => s.analysisTarget);
     const analysisProfile = useLabStore((s) => s.analysisProfile);
     const setAnalysisProfile = useLabStore((s) => s.setAnalysisProfile);
-    // лучи — только для radial-таргетов (эффективный: агентский override приоритетнее)
-    const effectiveTarget = analysisTarget ?? activeTarget;
-    const targetIsRadial = useLabStore((s) => s.getGradient(effectiveTarget)?.type === 'radial');
     const hasActiveGradient = useLabStore((s) => s.getGradient(s.activeTarget) !== null);
     const setCompareUI = useLabStore((s) => s.setCompareUI);
     const setSelectedStop = useLabStore((s) => s.setSelectedStop);
@@ -350,12 +347,11 @@ export function CompareSection() {
                             </label>
                             <label
                                 className="flex cursor-pointer items-center gap-1.5"
-                                title="Медиана 16 лучей из центра radial-градиента на нормированном радиусе: ось-линия слепа к объектам вне линии, лучи видят всю зону (только radial-таргеты)"
+                                title="Медиана вместо одной осевой линии: radial — 16 лучей из центра градиента, linear — 8 параллельных линий вдоль оси. Ось часто попадает в неудачное место фото, агрегат видит всю зону"
                             >
                                 <input
                                     type="checkbox"
                                     className="accent-lab-accent"
-                                    disabled={!targetIsRadial}
                                     checked={analysisProfile === 'rays'}
                                     onChange={(e) =>
                                         setAnalysisProfile(e.target.checked ? 'rays' : 'axis')

@@ -437,7 +437,11 @@ function useJournalSync() {
 
         const flush = (): void => {
             if (fields.length === 0) return;
-            const body = { ts: Date.now(), fields: fields.slice(0, 20), before };
+            const body = {
+                ts: Date.now(),
+                fields: fields.slice(0, 20),
+                ...(before !== null ? { before } : {}),
+            };
             fields = [];
             flushInFlight = true;
             agentPost('journal', body)

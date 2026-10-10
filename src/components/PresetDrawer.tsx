@@ -107,7 +107,6 @@ export function PresetDrawer({ onClose }: PresetDrawerProps) {
     const [tab, setTab] = useState<DrawerTab>('builtin');
     const update = useLabStore((s) => s.update);
     const setActiveTarget = useLabStore((s) => s.setActiveTarget);
-    const devApiAvailable = useLabStore((s) => s.devApiAvailable);
     const [userPresets, setUserPresets] = useState<UserPreset[]>(() => loadUserPresets());
     const [filePresets, setFilePresets] = useState<FilePreset[]>([]);
     const [name, setName] = useState('');
@@ -131,8 +130,8 @@ export function PresetDrawer({ onClose }: PresetDrawerProps) {
     };
 
     useEffect(() => {
-        if (devApiAvailable) refreshFiles();
-    }, [devApiAvailable]);
+        refreshFiles();
+    }, []);
 
     // применение пресета — merge visual-полей, undoable; вид — всегда в Fit
     const applyPreset = (apply: Partial<BlockState>) => {
@@ -318,10 +317,10 @@ export function PresetDrawer({ onClose }: PresetDrawerProps) {
                             </div>
                         ))}
 
-                        {devApiAvailable && (
+                        {filePresets !== null && (
                             <div className="mt-1 flex flex-col gap-2 border-t border-lab-border pt-2.5">
                                 <span className="px-1 text-[10px] tracking-wide text-lab-muted uppercase">
-                                    Файловые (presets/)
+                                    Файловые (Upstash / presets/)
                                 </span>
                                 {filePresets.length === 0 && (
                                     <p className="px-1 text-[10px] leading-snug text-lab-muted">

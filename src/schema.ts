@@ -400,7 +400,7 @@ export const JournalPostSchema = z.union([
     z.object({
         ts: z.number(),
         fields: z.array(z.string()).min(1),
-        before: JournalMetricsSchema.optional(),
+        before: JournalMetricsSchema.nullable().optional(),
     }),
     z.object({
         id: z.number(),

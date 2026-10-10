@@ -209,6 +209,15 @@ function renderBlock(state: BlockState, baseImg: HTMLCanvasElement | null): HTML
     if (!ctx) return canvas;
     const block: RectPx = { x: 0, y: 0, w: W, h: H };
 
+    // border-radius: CSS клипает весь контент блока — канва должна совпадать
+    // с блоком по скруглению, иначе углы дают ложные остатки на кромке
+    const radius = Math.min(round2(state.radius * scale), W / 2, H / 2);
+    if (radius > 0) {
+        ctx.beginPath();
+        ctx.roundRect(0, 0, W, H, radius);
+        ctx.clip();
+    }
+
     if (state.base.kind === 'color') {
         ctx.fillStyle = state.base.color;
         ctx.fillRect(0, 0, W, H);

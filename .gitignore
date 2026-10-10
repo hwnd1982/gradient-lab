@@ -26,7 +26,3 @@ dist-ssr
 # env
 .env
 .env.*
-
-# пресеты юзера/агентов (session-артефакты с dataURL-картинками; в репо только .gitkeep)
-presets/*.json
-!presets/.gitkeep

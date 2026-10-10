@@ -1,0 +1,172 @@
+{
+    "w": 221,
+    "h": 845,
+    "x": 1823,
+    "y": 123,
+    "radius": 24,
+    "base": {
+        "kind": "color",
+        "color": "#101010",
+        "gradient": {
+            "type": "linear",
+            "angle": 90,
+            "repeating": false,
+            "stops": [
+                {
+                    "id": "ac698538-3eca-4307-b734-83fb0e5b8d92",
+                    "pos": 0,
+                    "color": "#101010",
+                    "alpha": 1
+                },
+                {
+                    "id": "2eae598c-ee8e-4d47-98a9-66fd4fbdfc80",
+                    "pos": 100,
+                    "color": "#101010",
+                    "alpha": 0
+                }
+            ]
+        },
+        "image": null,
+        "fit": "cover",
+        "posX": 50,
+        "posY": 50
+    },
+    "layers": [
+        {
+            "id": "11432500-3e76-4281-a1f6-ae04bb7a8601",
+            "visible": true,
+            "opacity": 1,
+            "blend": "normal",
+            "gradient": {
+                "type": "linear",
+                "angle": 89.7,
+                "repeating": false,
+                "stops": [
+                    {
+                        "id": "da425b66-acac-4b30-b466-d1fa9d853890",
+                        "pos": 0,
+                        "color": "#ffffff",
+                        "alpha": 0
+                    },
+                    {
+                        "id": "ca3e5fb9-5d12-420a-8fc3-0e74137d01c1",
+                        "pos": 100,
+                        "color": "#000000",
+                        "alpha": 0.6
+                    }
+                ]
+            }
+        }
+    ],
+    "mask": {
+        "enabled": false,
+        "gradient": {
+            "type": "linear",
+            "angle": 180,
+            "repeating": false,
+            "stops": [
+                {
+                    "id": "34e7896c-a36e-44a6-a0cf-38341065f15f",
+                    "pos": 0,
+                    "color": "#ffffff",
+                    "alpha": 0
+                },
+                {
+                    "id": "c4b45d85-ad7d-4d77-b4ad-7806a1965b88",
+                    "pos": 100,
+                    "color": "#000000",
+                    "alpha": 0.6
+                }
+            ]
+        }
+    },
+    "blur": {
+        "enabled": false,
+        "radius": 24,
+        "background": null,
+        "mask": null
+    },
+    "blockBlend": "normal",
+    "clipText": {
+        "enabled": false,
+        "text": "Gradient",
+        "gradient": {
+            "type": "linear",
+            "angle": 90,
+            "repeating": false,
+            "stops": [
+                {
+                    "id": "d050ef5b-146f-44ba-b76c-6e7091fbaac7",
+                    "pos": 0,
+                    "color": "#7c6cff",
+                    "alpha": 1
+                },
+                {
+                    "id": "efcf306e-bfe8-426c-a720-9445354dddc7",
+                    "pos": 100,
+                    "color": "#ff5e8a",
+                    "alpha": 1
+                }
+            ]
+        }
+    },
+    "anim": {
+        "enabled": false,
+        "duration": 400,
+        "from": {
+            "type": "linear",
+            "angle": 180,
+            "repeating": false,
+            "stops": [
+                {
+                    "id": "d13bdcfc-ddb9-4230-81ee-82b057a8f8ac",
+                    "pos": 0,
+                    "color": "#ffffff",
+                    "alpha": 0
+                },
+                {
+                    "id": "ee4a6095-cf1f-48a1-8da3-5cd0a4fc0b8c",
+                    "pos": 100,
+                    "color": "#000000",
+                    "alpha": 0.6
+                }
+            ]
+        },
+        "to": {
+            "type": "linear",
+            "angle": 0,
+            "repeating": false,
+            "stops": [
+                {
+                    "id": "96d0f904-6aa4-41e4-b606-45d2b744e9be",
+                    "pos": 0,
+                    "color": "#ffffff",
+                    "alpha": 0
+                },
+                {
+                    "id": "99401afb-83d3-417a-93da-f9c4e442e616",
+                    "pos": 100,
+                    "color": "#000000",
+                    "alpha": 0.6
+                }
+            ]
+        }
+    },
+    "compare": {
+        "refImage": null,
+        "mode": "off",
+        "opacity": 0.5,
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        "splitPos": 50
+    },
+    "stage": {
+        "bg": "image",
+        "color": "#141416",
+        "image": null,
+        "x": 0,
+        "y": 0,
+        "scale": 100
+    }
+}

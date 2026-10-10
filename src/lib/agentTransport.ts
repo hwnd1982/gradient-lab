@@ -1,0 +1,111 @@
+import type { BlockState } from '../schema';
+
+/**
+ * Единый транспорт браузер → Agent API (контракт — в API.md).
+ *
+ * dev: пути /api/__* обслуживает vite-middleware (vite-plugins/agent-api.ts);
+ * формат запросов ровно тот же, что был до появления этого модуля.
+ *
+ * prod: те же данные уходят в Vercel-функции api/*.ts (/api/sync, /api/analysis,
+ * /api/warnings, /api/journal — dev-имена /api/__* там работают через rewrites
+ * в vercel.json); если задан VITE_LAB_TOKEN — добавляется Authorization: Bearer
+ * (мутации на проде можно закрыть env LAB_API_TOKEN).
+ */
+
+const IS_PROD = !import.meta.env.DEV;
+const TOKEN = import.meta.env.VITE_LAB_TOKEN;
+
+const PATHS = IS_PROD
+    ? {
+          sync: '/api/sync',
+          analysis: '/api/analysis',
+          warnings: '/api/warnings',
+          journal: '/api/journal',
+      }
+    : {
+          sync: '/api/__sync',
+          analysis: '/api/__analysis',
+          warnings: '/api/__warnings',
+          journal: '/api/__journal',
+      };
+
+export type AgentPath = keyof typeof PATHS;
+
+function headers(): Record<string, string> {
+    const h: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (TOKEN !== undefined && TOKEN !== '') h.Authorization = `Bearer ${TOKEN}`;
+    return h;
+}
+
+/**
+ * POST JSON в агентский API; null — сеть недоступна (тихий пропуск тика, как
+ * .catch(() => {}) до появления транспорта). Ответ не парсится — журнал ждёт
+ * {id} из него сам.
+ */
+export async function agentPost(path: AgentPath, body: unknown): Promise<Response | null> {
+    try {
+        return await fetch(PATHS[path], {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify(body),
+        });
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * POST стейта браузера (прод: /api/sync, тело {state}) → присвоенная сервером
+ * версия, null — не дошло/нет версии. Dev-ветка синка этим путём не ходит
+ * (см. useAgentSync в App.tsx — там прежний буквальный запрос).
+ */
+export async function agentSync(state: BlockState): Promise<number | null> {
+    try {
+        const r = await fetch(PATHS.sync, {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify({ state }),
+        });
+        if (!r.ok) return null;
+        const j: unknown = await r.json();
+        if (
+            typeof j === 'object' &&
+            j !== null &&
+            typeof (j as { version?: unknown }).version === 'number'
+        ) {
+            return (j as { version: number }).version;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+/** Ответ поллинга GET /api/state?since=N (прод). */
+export interface StatePoll {
+    status: number;
+    version?: number;
+    unchanged?: boolean;
+    state?: unknown;
+    /** заявка агента на анализ таргета (замена SSE analysis-request); стирается POST /api/analysis */
+    analysisRequest?: string;
+}
+
+/** Поллинг версии стейта; null — сеть недоступна. */
+export async function pollState(since: number): Promise<StatePoll | null> {
+    try {
+        const r = await fetch(`/api/state?since=${since}`, { headers: headers() });
+        const j: unknown = await r.json();
+        if (typeof j !== 'object' || j === null) return { status: r.status };
+        const o = j as Record<string, unknown>;
+        return {
+            status: r.status,
+            version: typeof o.version === 'number' ? o.version : undefined,
+            unchanged: o.unchanged === true,
+            state: 'state' in o ? o.state : undefined,
+            analysisRequest: typeof o.analysisRequest === 'string' ? o.analysisRequest : undefined,
+        };
+    } catch {
+        return null;
+    }
+}

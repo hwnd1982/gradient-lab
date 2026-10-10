@@ -7,7 +7,8 @@
     "skipLibCheck": true,
 
     /* Vercel-функции api/: web-standard Request/Response (без DOM) */
-    "module": "nodenext",
+    "module": "preserve",
+    "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",

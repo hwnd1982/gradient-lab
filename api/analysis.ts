@@ -1,5 +1,5 @@
-import { AnalysisPostSchema } from '../src/schema.ts';
-import { canonicalTargetKey, KNOWN_TARGET_KEYS } from '../shared/targetKeys.ts';
+import { AnalysisPostSchema } from '../src/schema';
+import { canonicalTargetKey, KNOWN_TARGET_KEYS } from '../shared/targetKeys';
 import {
     clearAnalysisReq,
     configured,
@@ -9,8 +9,8 @@ import {
     K,
     notConfigured,
     setAnalysisReq,
-} from '../server/kv.ts';
-import { json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
+} from '../server/kv';
+import { json, readJsonBody, requireMutationAuth, route } from '../server/rest';
 
 /** Кэш анализа: полный Analysis или маркер — у обоих есть поле target. */
 interface StoredAnalysis {

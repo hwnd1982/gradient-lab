@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import type { BlockState } from '../src/schema.ts';
-import { BlockStateSchema } from '../src/schema.ts';
-import { configured, notConfigured, writeStateVersion } from '../server/kv.ts';
-import { json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
+import type { BlockState } from '../src/schema';
+import { BlockStateSchema } from '../src/schema';
+import { configured, notConfigured, writeStateVersion } from '../server/kv';
+import { json, readJsonBody, requireMutationAuth, route } from '../server/rest';
 
 /**
  * Тело POST /api/sync: {state: BlockState} (браузер на проде) или голый

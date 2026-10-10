@@ -1,7 +1,7 @@
-import { sweepPayload } from '../sweep.ts';
-import { K, configured, kvReadJson, notConfigured } from '../../server/kv.ts';
-import type { StoredSweep } from '../../server/kv.ts';
-import { HttpError, json, route } from '../../server/rest.ts';
+import { sweepPayload } from '../sweep';
+import { K, configured, kvReadJson, notConfigured } from '../../server/kv';
+import type { StoredSweep } from '../../server/kv';
+import { HttpError, json, route } from '../../server/rest';
 
 /** id sweep — uuid (crypto.randomUUID), в ключе Upstash допустимы [a-zA-Z0-9-]. */
 const SWEEP_ID_RE = /^[a-zA-Z0-9-]+$/;

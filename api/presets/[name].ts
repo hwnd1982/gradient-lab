@@ -5,15 +5,15 @@ import {
     kvReadJson,
     kvWriteJson,
     notConfigured,
-} from '../../server/kv.ts';
+} from '../../server/kv';
 import {
     json,
     parseStateBody,
     readJsonBody,
     requireMutationAuth,
     route,
-} from '../../server/rest.ts';
-import { sanitizeName } from '../../shared/targetKeys.ts';
+} from '../../server/rest';
+import { sanitizeName } from '../../shared/targetKeys';
 
 /** Имя пресета из пути /api/presets/<name> (сегмент после /presets/). */
 function presetNameFromUrl(req: Request): string {

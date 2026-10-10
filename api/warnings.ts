@@ -1,7 +1,7 @@
-import type { WarningsPayload } from '../src/schema.ts';
-import { WarningsPayloadSchema } from '../src/schema.ts';
-import { K, configured, kvReadJson, kvWriteJson, notConfigured } from '../server/kv.ts';
-import { json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
+import type { WarningsPayload } from '../src/schema';
+import { WarningsPayloadSchema } from '../src/schema';
+import { K, configured, kvReadJson, kvWriteJson, notConfigured } from '../server/kv';
+import { json, readJsonBody, requireMutationAuth, route } from '../server/rest';
 
 /**
  * GET /api/warnings — борт-контроль старта. До первого POST — 404 с

@@ -1,5 +1,5 @@
-import { BlockStateSchema } from '../src/schema.ts';
-import type { BlockState } from '../src/schema.ts';
+import { BlockStateSchema } from '../src/schema';
+import type { BlockState } from '../src/schema';
 
 /** Лимит тела запроса — как в dev-middleware. */
 export const MAX_BODY_BYTES = 10 * 1024 * 1024;

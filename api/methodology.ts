@@ -1,5 +1,5 @@
-import { METHODOLOGY } from '../src/lib/methodology.ts';
-import { json, route } from '../server/rest.ts';
+import { METHODOLOGY } from '../src/lib/methodology';
+import { json, route } from '../server/rest';
 
 /**
  * GET /api/methodology — методика подгонки v2 (исполняемая процедура F0–F6)

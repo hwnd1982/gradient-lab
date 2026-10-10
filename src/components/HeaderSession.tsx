@@ -34,7 +34,6 @@ export function HeaderSession({
     onSwitch: (id: string) => void;
 }) {
     const [open, setOpen] = useState(false);
-    const [draft, setDraft] = useState('');
     const [error, setError] = useState('');
     const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
     // фидбек копирования брифа ('' — скрыт): обычный и «создать свою»
@@ -84,6 +83,15 @@ export function HeaderSession({
         if (trimmed !== session) onSwitch(trimmed);
     };
 
+    /** Новый id без ввода: s- + 6 случайных символов (crypto). */
+    const createSession = (): void => {
+        const alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        const bytes = new Uint8Array(6);
+        crypto.getRandomValues(bytes);
+        const id = 's-' + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+        openSession(id);
+    };
+
     const flashCopyNote = (note: string): void => {
         setCopyNote(note);
         if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
@@ -116,31 +124,15 @@ export function HeaderSession({
                 Сессия: <span className="font-mono">{session}</span>
             </button>
             {open && (
-                <div className="absolute right-0 top-full z-20 mt-1.5 flex w-72 flex-col gap-2 rounded-md border border-lab-border bg-lab-panel2 p-2.5 shadow-lg">
-                    <form
-                        className="flex gap-1.5"
-                        onSubmit={(e) => {
-                            e.preventDefault();
-                            openSession(draft);
-                        }}
+                <div className="absolute right-0 top-full z-[60] mt-1.5 flex w-72 flex-col gap-2 rounded-md border border-lab-border bg-lab-panel2 p-2.5 shadow-lg">
+                    <button
+                        type="button"
+                        className="cursor-pointer rounded-md border border-lab-border bg-lab-panel px-2 py-1.5 text-xs hover:border-lab-accent"
+                        onClick={createSession}
+                        title="Сгенерирует новый id и переключит вкладку на него"
                     >
-                        <input
-                            autoFocus
-                            value={draft}
-                            onChange={(e) => {
-                                setDraft(e.target.value);
-                                setError('');
-                            }}
-                            placeholder="id сессии: [a-zA-Z0-9_-], 1..64"
-                            className="min-w-0 flex-1 rounded border border-lab-border bg-lab-panel px-2 py-1 text-xs outline-none focus:border-lab-accent"
-                        />
-                        <button
-                            type="submit"
-                            className="shrink-0 cursor-pointer rounded border border-lab-border bg-lab-panel px-2 py-1 text-xs hover:border-lab-accent"
-                        >
-                            Открыть/создать
-                        </button>
-                    </form>
+                        + Создать сессию
+                    </button>
                     {error !== '' && <span className="text-[10px] text-red-300">{error}</span>}
                     <div className="flex max-h-40 flex-col gap-0.5 overflow-y-auto">
                         {sessions === null ? (
@@ -156,10 +148,7 @@ export function HeaderSession({
                                 <button
                                     key={s.id}
                                     type="button"
-                                    onClick={() => {
-                                        setDraft('');
-                                        openSession(s.id);
-                                    }}
+                                    onClick={() => openSession(s.id)}
                                     className={`flex cursor-pointer items-center justify-between gap-2 rounded px-1.5 py-1 text-left text-xs ${
                                         s.id === session
                                             ? 'bg-lab-accent/30 text-white'

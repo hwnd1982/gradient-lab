@@ -20,26 +20,8 @@ import { rolldown } from 'rolldown';
 const ROOT = new URL('..', import.meta.url).pathname;
 const API_DIR = `${ROOT}api`;
 
-/** Явный список: вход в server/functions → outfile в api/ (роуты Vercel). */
-const FUNCTIONS = [
-    { in: 'state', out: 'state.js' },
-    { in: 'sync', out: 'sync.js' },
-    { in: 'warnings', out: 'warnings.js' },
-    { in: 'analysis', out: 'analysis.js' },
-    { in: 'journal', out: 'journal.js' },
-    { in: 'presets', out: 'presets.js' },
-    // бывший api/presets/[name].ts — динамический роут, имя парсит из URL
-    { in: 'presets-name', out: 'presets/[name].js' },
-    { in: 'schema', out: 'schema.js' },
-    { in: 'sweep', out: 'sweep.js' },
-    // бывший api/sweep/[id].ts — path-параметр через контекст Vercel
-    { in: 'sweep-id', out: 'sweep/[id].js' },
-    { in: 'sessions', out: 'sessions.js' },
-    // api/sessions/[id].js — PUT (создать/переименовать) и DELETE слота
-    { in: 'sessions-id', out: 'sessions/[id].js' },
-    { in: 'methodology', out: 'methodology.js' },
-    { in: 'ping', out: 'ping.js' },
-];
+/** Единственный catch-all: Hobby-план лимитит 12 функций. */
+const FUNCTIONS = [{ in: 'router', out: '[[...path]].js' }];
 
 await rm(API_DIR, { recursive: true, force: true });
 await mkdir(API_DIR, { recursive: true });

@@ -9,13 +9,15 @@ import {
     SESSION_ID_RE,
 } from '../rest.ts';
 
-interface SessionsIdContext {
-    params: Promise<{ id: string }>;
+/** id из пути /api/sessions/<id> (catch-all роутер). */
+function sessionIdFromUrl(req: Request): string {
+    const segments = new URL(req.url).pathname.replace(/^\/+|\/+$/g, '').split('/');
+    return segments[2] ?? '';
 }
 
-/** id из пути /api/sessions/<id>; невалидный — 400 (тот же формат, что у X-Lab-Session). */
-async function sessionIdFromCtx(ctx: SessionsIdContext): Promise<string> {
-    const { id } = await ctx.params;
+/** id с валидацией; невалидный — HttpError 400 (формат как у X-Lab-Session). */
+async function sessionId(req: Request): Promise<string> {
+    const id = sessionIdFromUrl(req);
     if (!SESSION_ID_RE.test(id)) {
         throw new HttpError(400, {
             error: `невалидный id сессии «${id}»: допустимы [a-zA-Z0-9_-], 1..64 символа`,
@@ -32,11 +34,11 @@ const SessionPutSchema = z.object({ name: z.string().min(1).max(64) });
  * Создать слот можно и просто обратившись к любому эндпоинту с заголовком
  * X-Lab-Session: <id> (лениво) — PUT нужен ради осмысленного имени в списке.
  */
-export async function PUT(req: Request, ctx: SessionsIdContext): Promise<Response> {
+export async function PUT(req: Request): Promise<Response> {
     return route(async () => {
         if (!configured()) return notConfigured();
         requireMutationAuth(req);
-        const id = await sessionIdFromCtx(ctx);
+        const id = await sessionId(req);
         const parsed = SessionPutSchema.safeParse(await readJsonBody(req));
         if (!parsed.success) {
             return json(400, {
@@ -54,11 +56,11 @@ export async function PUT(req: Request, ctx: SessionsIdContext): Promise<Respons
  * warnings, analysis и заявки (analysisReq/sweepReq жили в слоте). Единственная
  * операция, требующая существования сессии (404). Под requireMutationAuth.
  */
-export async function DELETE(req: Request, ctx: SessionsIdContext): Promise<Response> {
+export async function DELETE(req: Request): Promise<Response> {
     return route(async () => {
         if (!configured()) return notConfigured();
         requireMutationAuth(req);
-        const id = await sessionIdFromCtx(ctx);
+        const id = await sessionId(req);
         if (!(await deleteSession(id))) {
             return json(404, { error: `сессия ${id} не найдена` });
         }

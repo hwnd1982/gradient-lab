@@ -6063,7 +6063,8 @@ const AnalysisMarkerSchema = object({
 	gradientMissing: boolean().optional(),
 	blocked: _enum(["no-reference"]).optional()
 }).refine((m) => m.gradientMissing !== void 0 || m.blocked !== void 0, { message: "маркер должен содержать gradientMissing или blocked" });
-union([
+/** Тело POST /api/__analysis: сброс кэша, полный анализ или маркер. */
+const AnalysisPostSchema = union([
 	object({ cleared: literal(true) }),
 	AnalysisSchema,
 	AnalysisMarkerSchema
@@ -6084,7 +6085,12 @@ const MethodologyPhaseSchema = object({
 	/** выход из фазы, включая запрет возврата к зафиксированным ручкам */
 	exit: string()
 });
-object({
+/**
+* Методика подгонки v2 — исполняемая процедура из одного места
+* (src/lib/methodology.ts): фазы F0–F6 + инварианты + тот же текст одним
+* блоком. Отдают dev-middleware и прод api/methodology.ts.
+*/
+const MethodologySchema = object({
 	version: literal(2),
 	phases: array(MethodologyPhaseSchema),
 	invariants: array(string()),
@@ -6102,7 +6108,8 @@ const WarningSchema = object({
 		h: number().optional()
 	}).optional()
 });
-union([object({ cleared: literal(true) }), object({ warnings: array(WarningSchema).min(1) })]);
+/** Тело POST /api/__warnings: предупреждения есть или явно сброшены. */
+const WarningsPayloadSchema = union([object({ cleared: literal(true) }), object({ warnings: array(WarningSchema).min(1) })]);
 /** Метрики анализа на момент итерации (запись журнала, GET /api/journal). */
 const JournalMetricsSchema = object({
 	zoneMatch: number(),
@@ -6116,7 +6123,8 @@ object({
 	before: JournalMetricsSchema.nullable(),
 	after: JournalMetricsSchema.nullable()
 });
-union([object({
+/** Тело POST /api/__journal: новая запись (start) или дозаполнение after (finish). */
+const JournalPostSchema = union([object({
 	ts: number(),
 	fields: array(string()).min(1),
 	before: JournalMetricsSchema.optional()
@@ -6124,7 +6132,8 @@ union([object({
 	id: number(),
 	after: JournalMetricsSchema
 })]);
-object({
+/** Тело POST /api/sweep: заявка агента на авто-перебор значения одной командой. */
+const SweepReqSchema = object({
 	field: literal("blur.radius"),
 	from: number(),
 	to: number(),
@@ -6136,7 +6145,12 @@ const SweepPointSchema = object({
 	zoneMatchPercent: number(),
 	maxError: number()
 });
-object({
+/**
+* Тело POST /api/__sweep: результат исполнения заявки приложением — таблица
+* точек и/или abort (стейт изменился не транзиентным путём: юзер/агент
+* вмешались). Refine: хотя бы одно из results/aborted.
+*/
+const SweepResultSchema = object({
 	id: string().min(1),
 	results: array(SweepPointSchema).optional(),
 	aborted: string().optional()
@@ -6207,7 +6221,48 @@ function defaultLinearGradient(angle = 180, stops) {
 	};
 }
 //#endregion
-//#region server/rest.ts
+//#region shared/targetKeys.ts
+/**
+* Общие чистые хелперы Agent API для dev (vite-plugins/agent-api.ts) и прода
+* (api/*.ts): канонизация таргетов анализа и санитизация имён пресетов.
+*
+* Валидные ключи ?target= — единый источник: 400-ответ (known) и список в
+* разделе API.md «GET /api/analysis» держать синхронным с этим массивом.
+* 'layer:<index>' — шаблон; канонический ключ — 'layer:N' без ведущих нулей.
+*/
+const KNOWN_TARGET_KEYS = [
+	"base",
+	"blockMask",
+	"blurMask",
+	"blurBg",
+	"underlay",
+	"clipText",
+	"animFrom",
+	"animTo",
+	"layer:<index>"
+];
+/**
+* Валидный ?target= → канонический ключ (текстом: сервер только валидирует и
+* передаёт, разбор в таргет делает приложение). 'mask' — алиас blockMask,
+* числовой суффикс layer нормализуется (layer:007 → layer:7).
+*/
+function canonicalTargetKey(raw) {
+	if (raw === "mask") return "blockMask";
+	if (KNOWN_TARGET_KEYS.includes(raw)) return raw;
+	const m = raw.match(/^layer:(\d+)$/);
+	if (m !== null) return `layer:${Number(m[1])}`;
+	return null;
+}
+/** 'мой пресет!.json' -> 'my-preset-' безопасное имя (латиница, цифры, _ и -). */
+function sanitizeName(raw) {
+	let decoded;
+	try {
+		decoded = decodeURIComponent(raw);
+	} catch {
+		return null;
+	}
+	return decoded.replace(/\.json$/i, "").replace(/[^a-zA-Z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
+}
 /** Управляемый отказ (ловится wrapper'ом route в каждой функции). */
 var HttpError = class extends Error {
 	status;
@@ -6233,8 +6288,94 @@ async function route(fn) {
 		return json(500, { error: String(err) });
 	}
 }
+/** Тело запроса с лимитом 10 МБ (аналог readBody dev-middleware). */
+async function readBody(req) {
+	const text = await req.text();
+	if (Buffer.byteLength(text, "utf8") > 10485760) throw new HttpError(413, { error: "тело запроса больше 10 МБ" });
+	return text;
+}
+/** Тело запроса → JSON; 400 при невалидном JSON. */
+async function readJsonBody(req) {
+	const raw = await readBody(req);
+	try {
+		return JSON.parse(raw);
+	} catch {
+		throw new HttpError(400, { error: "тело запроса не является JSON" });
+	}
+}
+/** Значение → валидный BlockState; при ошибке кидает HttpError(400). */
+function parseStateBody(value) {
+	const parsed = BlockStateSchema.safeParse(value);
+	if (!parsed.success) throw new HttpError(400, {
+		error: "invalid BlockState",
+		issues: parsed.error.issues
+	});
+	return parsed.data;
+}
+/** Дефолтная сессия прода: заголовок X-Lab-Session не задан/пуст (см. API.md «Сессии»). */
+const DEFAULT_SESSION = "default";
+/** Допустимый id сессии: [a-zA-Z0-9_-], 1..64 символа. */
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+/** id sweep — uuid (crypto.randomUUID), в ключе Upstash допустимы [a-zA-Z0-9-]. */
+const SWEEP_ID_RE = /^[a-zA-Z0-9-]+$/;
+/**
+* Сессия из заголовка X-Lab-Session (прод): без заголовка — 'default',
+* невалидный id — 400. Клиент шлёт его из sessionStorage, агент — выбирает
+* свой слот доски (мульти-сессионность, см. API.md «Сессии»).
+*/
+function sessionFromRequest(req) {
+	const raw = req.headers.get("x-lab-session");
+	const id = raw === null || raw === "" ? DEFAULT_SESSION : raw;
+	if (!SESSION_ID_RE.test(id)) throw new HttpError(400, { error: `невалидный X-Lab-Session «${id}»: допустимы [a-zA-Z0-9_-], 1..64 символа` });
+	return id;
+}
+/**
+* Мутации можно закрыть токеном: env LAB_API_TOKEN (сервер) + VITE_LAB_TOKEN
+* (клиент, тот же токен). Не задан — авторизация выключена. Нет заголовка —
+* 401, неверный токен — 403. Чтение (GET) открыто всегда.
+*/
+function requireMutationAuth(req) {
+	const token = process.env.LAB_API_TOKEN;
+	if (typeof token !== "string" || token === "") return;
+	const auth = req.headers.get("authorization");
+	if (auth === null || !auth.startsWith("Bearer ")) throw new HttpError(401, { error: "мутации требуют Authorization: Bearer <LAB_API_TOKEN>" });
+	if (auth.slice(7) !== token) throw new HttpError(403, { error: "неверный токен" });
+}
 //#endregion
 //#region server/kv.ts
+/**
+* Прод-стор Agent API: Upstash Redis через REST — чистый fetch, без пакетов.
+* env KV_REST_API_URL/KV_REST_API_TOKEN проставляет интеграция Upstash
+* (Vercel → Storage → Marketplace). Без env все прод-функции отвечают 503.
+*
+* Команды: GET {url}/get|incr|del/<key>; SET — POST {url}/set/<key> с значением
+* в теле (документированный путь Upstash для больших значений: стейты с
+* dataURL-картинками бывают на мегабайты, URL-путь их не вместит).
+*/
+/** Ключи (см. API.md «Прод (Vercel)» и «Сессии»). */
+const K = {
+	legacyState: "lab:state",
+	legacyStatever: "lab:statever",
+	legacyWarnings: "lab:warnings",
+	legacyAnalysis: "lab:analysis",
+	/** индекс сессий [{id, name, updatedAt}], cap SESSIONS_LIMIT */
+	sessions: "lab:sessions",
+	/** журнал итераций — ОБЩИЙ для всех сессий (общая лента подбора) */
+	journal: "lab:journal",
+	/** индекс имён пресетов (JSON-массив) — пресеты глобальны */
+	presetIndex: "lab:presets",
+	preset: (name) => `lab:preset:${name}`,
+	/** {version, state, analysisReq?, sweepReq?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
+	state: (id) => `lab:s/${id}`,
+	/** счётчик версий стейта слота (INCR при каждой записи) */
+	statever: (id) => `lab:s/${id}/ver`,
+	warnings: (id) => `lab:s/${id}/warnings`,
+	analysis: (id) => `lab:s/${id}/analysis`,
+	/** результат sweep по id (TTL не нужен — перетирается следующим заходом); id сессии в ключе, чтобы чужой sweep не читался */
+	sweep: (id, sweepId) => `lab:s/${id}/sweep/${sweepId}`
+};
+/** Вместимость индекса сессий: при переполнении выкидываем самые неактивные. */
+const SESSIONS_LIMIT = 50;
 const NOT_CONFIGURED_ERROR = { error: "prod API не настроен: добавь Upstash-интеграцию (KV_REST_API_URL/KV_REST_API_TOKEN)" };
 /** env от Upstash-интеграции Vercel; null — интеграция не подключена. */
 function kvEnv() {
@@ -6254,10 +6395,629 @@ function configured() {
 function notConfigured() {
 	return json(503, NOT_CONFIGURED_ERROR);
 }
+function kvError(message) {
+	return new HttpError(502, { error: `сбой Upstash REST: ${message}` });
+}
+async function kvRequest(path, init) {
+	const env = kvEnv();
+	if (env === null) throw new HttpError(503, NOT_CONFIGURED_ERROR);
+	const method = init?.method ?? "GET";
+	let res;
+	try {
+		res = await fetch(`${env.url}/${path}`, {
+			...init ?? {},
+			headers: { Authorization: `Bearer ${env.token}` }
+		});
+	} catch (err) {
+		throw kvError(`${method} /${path}: ${String(err)}`);
+	}
+	let body;
+	try {
+		body = await res.json();
+	} catch {
+		throw kvError(`${method} /${path}: ответ не JSON (${res.status})`);
+	}
+	const isErr = typeof body === "object" && body !== null && "error" in body;
+	if (!res.ok || isErr) throw kvError(`${method} /${path}: ${isErr ? String(body.error) : `HTTP ${res.status}`}`);
+	return body.result ?? null;
+}
+/** Прочитать JSON-значение ключа; null — ключа нет. */
+async function kvReadJson(key) {
+	const result = await kvRequest(`get/${encodeURIComponent(key)}`);
+	if (result === null || result === void 0) return null;
+	if (typeof result !== "string") return result;
+	try {
+		return JSON.parse(result);
+	} catch {
+		throw kvError(`ключ ${key}: значение не JSON`);
+	}
+}
+/** Записать значение как JSON (телом POST — см. примечание в шапке модуля). */
+async function kvWriteJson(key, value) {
+	await kvRequest(`set/${encodeURIComponent(key)}`, {
+		method: "POST",
+		body: JSON.stringify(value)
+	});
+}
+/** INCR счётчика; возвращает новое значение. */
+async function kvIncr(key) {
+	const result = await kvRequest(`incr/${encodeURIComponent(key)}`);
+	const n = Number(result);
+	if (!Number.isInteger(n)) throw kvError(`incr ${key}: результат не целое число`);
+	return n;
+}
+async function kvDelete(key) {
+	await kvRequest(`del/${encodeURIComponent(key)}`);
+}
+/**
+* Незакрытые заявки (analysisReq/sweepReq) переносятся в новую запись слота:
+* синк браузера и агентский PUT не должны затирать их, пока приложение не
+* забрало/не исполнило заявку.
+*/
+function withPending(next, prev) {
+	const out = {
+		...next,
+		name: prev.name,
+		updatedAt: Date.now()
+	};
+	if (typeof prev.analysisReq === "string") out.analysisReq = prev.analysisReq;
+	if (prev.sweepReq !== void 0) out.sweepReq = prev.sweepReq;
+	return out;
+}
+/** Прочитать индекс сессий (как есть, порядок — по updatedAt по возрастанию). */
+async function readIndex() {
+	return await kvReadJson(K.sessions) ?? [];
+}
+/** Индекс сессий для ответа GET /api/sessions: новые сверху. */
+async function sessionIndex() {
+	return (await readIndex()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+/**
+* Upsert строки сессии в индекс (cap 50: выкидываем самые неактивные —
+* сортировка по updatedAt). Не транзакционно, как весь стор: потерянная
+* параллельным пишущим строка самовосстанавливается следующим touchIndex
+* этой сессии (слот при обращении пересоздаёт строку).
+*/
+async function touchIndex(id, name) {
+	const next = (await readIndex()).filter((e) => e.id !== id);
+	next.push({
+		id,
+		name,
+		updatedAt: Date.now()
+	});
+	next.sort((a, b) => a.updatedAt - b.updatedAt);
+	const capped = next.length > SESSIONS_LIMIT ? next.slice(next.length - SESSIONS_LIMIT) : next;
+	await kvWriteJson(K.sessions, capped);
+}
+/**
+* Разовая миграция односессионной эпохи → слот default: lab:state (плюс
+* счётчик/warnings/analysis) переносится в lab:s/default*, legacy-ключи
+* удаляются. Вызывается только при первом обращении к default, когда слота
+* ещё нет. Не транзакционно (как весь стор): параллельные первые обращения
+* читают одни и те же legacy-ключи и пишут эквивалентный слот.
+*/
+async function migrateLegacyDefault() {
+	const legacy = await kvReadJson(K.legacyState);
+	if (legacy === null) return null;
+	const session = {
+		...legacy,
+		name: DEFAULT_SESSION,
+		updatedAt: Date.now()
+	};
+	await kvWriteJson(K.state(DEFAULT_SESSION), session);
+	const ver = await kvReadJson(K.legacyStatever);
+	await kvWriteJson(K.statever(DEFAULT_SESSION), ver ?? legacy.version);
+	const warnings = await kvReadJson(K.legacyWarnings);
+	if (warnings !== null) await kvWriteJson(K.warnings(DEFAULT_SESSION), warnings);
+	const analysis = await kvReadJson(K.legacyAnalysis);
+	if (analysis !== null) await kvWriteJson(K.analysis(DEFAULT_SESSION), analysis);
+	await kvDelete(K.legacyState);
+	await kvDelete(K.legacyStatever);
+	await kvDelete(K.legacyWarnings);
+	await kvDelete(K.legacyAnalysis);
+	await touchIndex(DEFAULT_SESSION, DEFAULT_SESSION);
+	return session;
+}
+/**
+* Слот сессии по обращению — лениво: несуществующая сессия создаётся с пустым
+* стейтом (версия 0) и попадает в индекс; DELETE /api/sessions/<id> сюда не
+* ходит (там 404 на несуществующую). Для default при первом обращении
+* переносит legacy lab:state (см. migrateLegacyDefault). Существующий слот —
+* ровно 1 команда (полл-тик дешевле не сделать).
+*/
+async function ensureSession(id) {
+	const existing = await kvReadJson(K.state(id));
+	if (existing !== null) return existing;
+	if (id === "default") {
+		const migrated = await migrateLegacyDefault();
+		if (migrated !== null) return migrated;
+	}
+	const raced = await kvReadJson(K.state(id));
+	if (raced !== null) return raced;
+	const fresh = {
+		version: 0,
+		state: null,
+		name: id,
+		updatedAt: Date.now()
+	};
+	await kvWriteJson(K.state(id), fresh);
+	await touchIndex(id, id);
+	return fresh;
+}
+/**
+* Записать новую версию стейта слота: INCR + write с сохранением ждущих заявок
+* analysisReq/sweepReq. Возвращает присвоенную версию. Бонусом — touchIndex:
+* живость сессии в списке /api/sessions и порядок eviction по ней же.
+*/
+async function writeStateVersion(sessionId, state) {
+	const prev = await ensureSession(sessionId);
+	const version = await kvIncr(K.statever(sessionId));
+	await kvWriteJson(K.state(sessionId), withPending({
+		version,
+		state
+	}, prev));
+	await touchIndex(sessionId, prev.name);
+	return version;
+}
+/**
+* Положить заявку sweep в слот (доставка приложению поллом; версия не
+* инкрементится — как у analysisReq) с сохранением analysisReq.
+*/
+async function setSweepReq(sessionId, req) {
+	const st = await ensureSession(sessionId);
+	const next = {
+		version: st.version,
+		state: st.state,
+		name: st.name,
+		updatedAt: Date.now(),
+		sweepReq: req
+	};
+	if (typeof st.analysisReq === "string") next.analysisReq = st.analysisReq;
+	await kvWriteJson(K.state(sessionId), next);
+}
+/**
+* Положить заявку анализа в слот (доставка приложению поллом; версия не
+* инкрементится) с сохранением sweep-заявки. Единственный писатель analysisReq
+* кроме clearAnalysisReq — чтобы промах GET ?target= не стирал чужую sweep-заявку.
+* Идемпотентна: та же заявка не перезаписывается (без лишних команд).
+*/
+async function setAnalysisReq(sessionId, key) {
+	const st = await ensureSession(sessionId);
+	if (st.analysisReq === key) return;
+	const next = {
+		version: st.version,
+		state: st.state,
+		name: st.name,
+		updatedAt: Date.now(),
+		analysisReq: key
+	};
+	if (st.sweepReq !== void 0) next.sweepReq = st.sweepReq;
+	await kvWriteJson(K.state(sessionId), next);
+}
+/** Стереть заявку sweep по id (результат получен); анализ-заявку сохраняет. */
+async function clearSweepReq(sessionId, id) {
+	const st = await kvReadJson(K.state(sessionId));
+	if (st === null || st.sweepReq === void 0 || st.sweepReq.id !== id) return;
+	const next = {
+		version: st.version,
+		state: st.state,
+		name: st.name,
+		updatedAt: st.updatedAt
+	};
+	if (typeof st.analysisReq === "string") next.analysisReq = st.analysisReq;
+	await kvWriteJson(K.state(sessionId), next);
+}
+/** Стереть заявку анализа (свежий анализ получен); sweep-заявку сохраняет. */
+async function clearAnalysisReq(sessionId) {
+	const st = await kvReadJson(K.state(sessionId));
+	if (st === null || typeof st.analysisReq !== "string") return;
+	const next = {
+		version: st.version,
+		state: st.state,
+		name: st.name,
+		updatedAt: st.updatedAt
+	};
+	if (st.sweepReq !== void 0) next.sweepReq = st.sweepReq;
+	await kvWriteJson(K.state(sessionId), next);
+}
+/**
+* Создать/переименовать сессию (PUT /api/sessions/<id>): несуществующая —
+* пустой слот с данным именем, существующая — только имя + updatedAt.
+*/
+async function upsertSession(id, name) {
+	const existing = await kvReadJson(K.state(id));
+	if (existing !== null) await kvWriteJson(K.state(id), {
+		...existing,
+		name,
+		updatedAt: Date.now()
+	});
+	else await kvWriteJson(K.state(id), {
+		version: 0,
+		state: null,
+		name,
+		updatedAt: Date.now()
+	});
+	await touchIndex(id, name);
+}
+/**
+* Удалить слот сессии (DELETE /api/sessions/<id>): стейт, счётчик версий,
+* warnings, analysis — заявки жили в слоте, удалились вместе с ним. Возвращает
+* false, если сессии не было. Ключи результатов sweep (lab:s/<id>/sweep/<uuid>)
+* не перечислимы без SCAN — остаются орфанными (не читаются без uuid,
+* перезатираются новыми sweep той же сессии). Для default заодно сносим
+* legacy-ключи, чтобы удаление было честным сбросом (иначе следующий заход
+* пере-мигрировал бы старьё).
+*/
+async function deleteSession(id) {
+	if (await kvReadJson(K.state(id)) === null) return false;
+	await kvDelete(K.state(id));
+	await kvDelete(K.statever(id));
+	await kvDelete(K.warnings(id));
+	await kvDelete(K.analysis(id));
+	if (id === "default") {
+		await kvDelete(K.legacyState);
+		await kvDelete(K.legacyStatever);
+		await kvDelete(K.legacyWarnings);
+		await kvDelete(K.legacyAnalysis);
+	}
+	const index = await readIndex();
+	const next = index.filter((e) => e.id !== id);
+	if (next.length !== index.length) await kvWriteJson(K.sessions, next);
+	return true;
+}
+//#endregion
+//#region server/functions/analysis.ts
+/**
+* GET /api/analysis(?target=<key>) — последний diff-анализ сессии
+* (X-Lab-Session; несуществующая создаётся лениво). Без ?target — последний
+* посчитанный. С ?target: кэш валиден только при совпадении target; на промахе
+* заявка пишется в analysisReq того же слота lab:s/<id> (браузер забирает её
+* поллингом GET /api/state?since и пересчитывает, POST стирает) — агент
+* повторяет GET раз в ~5 с, пока не придёт ответ с этим target (в dev то же
+* делал SSE). Промах — это запись, поэтому при заданном LAB_API_TOKEN он
+* требует Bearer, как остальные агентские мутации (анти-спам заявок).
+*/
+async function GET$11(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		const sessionId = sessionFromRequest(req);
+		await ensureSession(sessionId);
+		const targetParam = new URL(req.url).searchParams.get("target");
+		const stored = await kvReadJson(K.analysis(sessionId));
+		if (targetParam === null) {
+			if (stored === null) return json(404, { error: "анализа ещё нет: загрузите референс в браузере (секция «Сравнение с макетом») — приложение пришлёт POST /api/analysis" });
+			return json(200, stored);
+		}
+		const key = canonicalTargetKey(targetParam);
+		if (key === null) return json(400, {
+			error: `неизвестный target «${targetParam}»`,
+			known: KNOWN_TARGET_KEYS
+		});
+		if (stored !== null && stored.target === key) return json(200, stored);
+		requireMutationAuth(req);
+		await setAnalysisReq(sessionId, key);
+		return json(404, {
+			error: `анализ для target=${key} запрошен у приложения (заявка analysisReq в lab:s/${sessionId}, браузер подхватит поллингом ≤10 с); повторите GET через ~5 с, пока ответ не придёт с этим target`,
+			requested: key
+		});
+	});
+}
+/**
+* POST /api/analysis (прод-аналог dev POST /api/__analysis) — браузер шлёт
+* diff-анализ/маркер (debounce ~500ms) в слот своей сессии. {"cleared":true} —
+* референс убрали: кэш сбрасываем, старьё не отдаём (заявку не трогаем — если
+* агент ждёт таргет, она разрулится маркером blocked:'no-reference').
+*/
+async function POST$4(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const sessionId = sessionFromRequest(req);
+		await ensureSession(sessionId);
+		const parsed = AnalysisPostSchema.safeParse(await readJsonBody(req));
+		if (!parsed.success) return json(400, {
+			error: "invalid Analysis payload",
+			issues: parsed.error.issues
+		});
+		if ("cleared" in parsed.data) {
+			await kvDelete(K.analysis(sessionId));
+			return json(200, { ok: true });
+		}
+		await kvWriteJson(K.analysis(sessionId), parsed.data);
+		await clearAnalysisReq(sessionId);
+		return json(200, { ok: true });
+	});
+}
+//#endregion
+//#region server/functions/journal.ts
+/** Вместимость журнала (как кольцевой буфер dev-сервера). */
+const JOURNAL_LIMIT = 200;
+/** GET /api/journal — журнал итераций (общая лента всех сессий: заголовок X-Lab-Session валидируется, но на данные не влияет). */
+async function GET$10(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		sessionFromRequest(req);
+		return json(200, { entries: await kvReadJson(K.journal) ?? [] });
+	});
+}
+/**
+* POST /api/journal (прод-аналог dev POST /api/__journal): start {ts, fields,
+* before?} → {ok, id}; finish {id, after} дозаполняет метрики. Массив живёт в
+* lab:journal целиком (read-modify-write, cap 200) — id = max+1, уникальны и
+* после DELETE.
+*/
+async function POST$3(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const parsed = JournalPostSchema.safeParse(await readJsonBody(req));
+		if (!parsed.success) return json(400, {
+			error: "invalid journal payload",
+			issues: parsed.error.issues
+		});
+		const data = parsed.data;
+		const entries = await kvReadJson(K.journal) ?? [];
+		if ("id" in data) {
+			const entry = entries.find((e) => e.id === data.id);
+			if (entry === void 0) return json(404, { error: `запись журнала ${data.id} не найдена` });
+			entry.after = data.after;
+			await kvWriteJson(K.journal, entries);
+			return json(200, {
+				ok: true,
+				id: entry.id
+			});
+		}
+		const entry = {
+			id: entries.reduce((m, e) => Math.max(m, e.id), 0) + 1,
+			ts: data.ts,
+			fields: data.fields,
+			before: data.before ?? null,
+			after: null
+		};
+		entries.push(entry);
+		const capped = entries.length > JOURNAL_LIMIT ? entries.slice(entries.length - JOURNAL_LIMIT) : entries;
+		await kvWriteJson(K.journal, capped);
+		return json(200, {
+			ok: true,
+			id: entry.id
+		});
+	});
+}
+/** DELETE /api/journal — очистить журнал. */
+async function DELETE$2(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const entries = await kvReadJson(K.journal) ?? [];
+		await kvDelete(K.journal);
+		return json(200, {
+			ok: true,
+			cleared: entries.length
+		});
+	});
+}
+/**
+* Структурированная форма той же процедуры: фазы с действиями и выходом
+* (выход содержит запрет возврата), инварианты и текст одним блоком.
+* Parse на месте — канарейка: рассинрон формы и схемы валит импорт сразу.
+*/
+const METHODOLOGY = MethodologySchema.parse({
+	version: 2,
+	phases: [
+		{
+			id: "F0",
+			title: "Старт",
+			actions: ["w/h = аспект кропа; base.image + compare.refImage; export.scale по факту кадров", "ЦИКЛ: PUT → warnings → чинить ВСЕ warn → пока не cleared"],
+			exit: "warnings cleared; ЗАПРЕЩЕНО мутировать пустой стейт (нет base.image/refImage → восстановить из файла)"
+		},
+		{
+			id: "F1",
+			title: "Геометрия (вне лабы, без PUT-циклов)",
+			actions: [
+				"сгладить оба кадра: -blur 0x2 (убрать фотошум)",
+				"difference → профиль по оси эффекта (строки для низ/верх, колонки для боков)",
+				"blur.rect = [onset(>8%max) … 100%]; по умолчанию внутри блока; заход за край — только как приём мягкого входа/выхода (легален при stage.isolated: true)",
+				"отдельно mean-сдвиг base vs ref по зоне = уровень затемнения Z; Z > 2 уровней → заливка будет обязательна (F4)"
+			],
+			exit: "rect зафиксирован, до F5 НЕ ТРОГАЕТСЯ"
+		},
+		{
+			id: "F2",
+			title: "Радиус (коридор, не деление от большого)",
+			actions: ["для photo-кадров 1x–2x коридор 8–14px, старт с середины (10–12), шаг ±2–3", "коридор радиуса одной командой: POST /api/sweep {field:\"blur.radius\", from, to, steps} → таблица zoneMatch/maxErr"],
+			exit: "прирост zoneMatch < 0.5 за шаг → радиус ЗАФИКСИРОВАН и не меняется ни в одной следующей фазе (плато широкое: 10/11/12 давали 98.4/98.3/98.2)"
+		},
+		{
+			id: "F3",
+			title: "Маска (форма)",
+			actions: ["предразогрев (0.1@~35% rect) → основной фронт (0.5@~46 → 1@~58) → плато до конца зоны", "ручки: позиции стопов + высота пилота"],
+			exit: "метрика честна к середине маски, но финальную форму утверждает юзер"
+		},
+		{
+			id: "F4",
+			title: "Заливка",
+			actions: [
+				"если Z>2 — обязательна, форма тающая от фронта",
+				"если Z~0 — НЕ добавлять «по умолчанию» (роняла 98.4→84.9)",
+				"после F3 ОДНА проба тонкой тающей (0.15@0→0@100): keep если zoneMatch вырос, revert если упал (в сессии дала финальные 98.7 и худшую точку 14→10)"
+			],
+			exit: "keep/revert по ΔzoneMatch (решения по Δ≥0.5)"
+		},
+		{
+			id: "F5",
+			title: "Геометрические приёмы",
+			actions: ["если plateau < целевого: по одному, keep/revert каждая", "rect-заход за край (y −20%, h 120%) · двухступенчатая маска · заливка-вспышка"],
+			exit: "каждый приём зафиксирован (keep) или откачен (revert); blur.rect из F1 трогается только здесь"
+		},
+		{
+			id: "F6",
+			title: "Стоп",
+			actions: [
+				"zoneMatch стабилен 2 замера (±0.3 — не прогресс) И verdict без «уровня» И остатки только blur (≤3 точек)",
+				"отдать baseline юзеру: его руки — финальный оптимизатор (2 сессии подряд ручной вариант бил циклический подбор)",
+				"перед циклом сохранить полный стейт в файл; после каждого PUT сверять base.image/refImage на месте; рестарт dev-сервера = пустой кэш → восстановить из файла, пустой стейт не мутировать"
+			],
+			exit: "остановиться и отчитаться: что подобрано, какие остатки остались и почему не лечатся; арбитр — глаза юзера"
+		}
+	],
+	invariants: [
+		"ВХОД: base + ref (один момент, одинаковый кроп), полный стейт-файл на диске",
+		"ГЛАВНАЯ МЕТРИКА: zoneMatch(target); РЕШЕНИЯ — по шагам ≥0.5 (дрожжание канвы ±0.3 — шум)",
+		"перед КАЖДЫМ PUT: свежий GET",
+		"PUT = полный стейт",
+		"base.image/refImage на месте",
+		"одна ручка за итерацию",
+		"wholesale-резеты запрещены",
+		"откат — /api/journal или локальный state-full.json",
+		"решения по Δ≥0.5"
+	],
+	text: `ВХОД: base + ref (один момент, одинаковый кроп), полный стейт-файл на диске.
+ГЛАВНАЯ МЕТРИКА: zoneMatch(target). РЕШЕНИЯ — по шагам ≥0.5 (дрожжание канвы ±0.3 — шум).
+F0 СТАРТ: w/h = аспект кропа; base.image + compare.refImage; export.scale по факту кадров.
+  ЦИКЛ: PUT → warnings → чинить ВСЕ warn → пока не cleared. ЗАПРЕЩЕНО мутировать
+  пустой стейт (нет base.image/refImage → восстановить из файла).
+F1 ГЕОМЕТРИЯ (вне лабы, без PUT-циклов):
+  1. сгладить оба кадра: -blur 0x2 (убрать фотошум);
+  2. difference → профиль по оси эффекта (строки для низ/верх, колонки для боков);
+  3. blur.rect = [onset(>8%max) … 100%]; по умолчанию внутри блока; заход за край —
+     только как приём мягкого входа/выхода (легален при stage.isolated: true);
+  4. отдельно mean-сдвиг base vs ref по зоне = уровень затемнения Z;
+     Z > 2 уровней → заливка будет обязательна (F4).
+  ВЫХОД: rect зафиксирован, до F5 НЕ ТРОГАЕТСЯ.
+F2 РАДИУС (коридор, не деление от большого): для photo-кадров 1x–2x коридор 8–14px,
+  старт с середины (10–12), шаг ±2–3. ВЫХОД: прирост zoneMatch < 0.5 за шаг →
+  радиус ЗАФИКСИРОВАН и не меняется ни в одной следующей фазе (плато широкое:
+  10/11/12 давали 98.4/98.3/98.2).
+F3 МАСКА (форма): предразогрев (0.1@~35% rect) → основной фронт (0.5@~46 → 1@~58)
+  → плато до конца зоны. Ручки: позиции стопов + высота пилота. Метрика честна к
+  середине маски, но финальную форму утверждает юзер.
+F4 ЗАЛИВКА: если Z>2 — обязательна, форма тающая от фронта. Если Z~0 — НЕ добавлять
+  «по умолчанию» (роняла 98.4→84.9); после F3 ОДНА проба тонкой тающей (0.15@0→0@100):
+  keep если zoneMatch вырос, revert если упал (в сессии дала финальные 98.7 и худшую
+  точку 14→10).
+F5 ГЕОМЕТРИЧЕСКИЕ ПРИЁМЫ (если plateau < целевого): по одному, keep/revert каждая:
+  rect-заход за край (y −20%, h 120%) · двухступенчатая маска · заливка-вспышка.
+F6 СТОП: zoneMatch стабилен 2 замера (±0.3 — не прогресс) И verdict без «уровня» И
+  остатки только blur (≤3 точек). Отдать baseline юзеру: его руки — финальный
+  оптимизатор (2 сессии подряд ручной вариант бил циклический подбор). Перед циклом
+  сохранить полный стейт в файл; после каждого PUT сверять base.image/refImage на
+  месте; рестарт dev-сервера = пустой кэш → восстановить из файла, пустой стейт
+  не мутировать.
+ИНВАРИАНТЫ перед КАЖДЫМ PUT: свежий GET; PUT = полный стейт; base.image/refImage
+на месте; одна ручка за итерацию; wholesale-резеты запрещены; откат — /api/journal
+или локальный state-full.json; решения по Δ≥0.5.`
+});
+//#endregion
+//#region server/functions/methodology.ts
+/**
+* GET /api/methodology — методика подгонки v2 (исполняемая процедура F0–F6)
+* из одного места: src/lib/methodology.ts — тот же ответ отдаёт dev-middleware.
+* Формат: {version: 2, phases: [{id, title, actions[], exit}], invariants[],
+* text} — text это та же процедура одним блоком. Upstash не нужен: работает
+* всегда, даже без env (503-контракт на остальные прод-функции не влияет).
+*/
+async function GET$9() {
+	return route(async () => json(200, METHODOLOGY));
+}
+//#endregion
+//#region server/functions/ping.ts
+/** Пинг рантайма: без импортов (родился пробной функцией бисекта). Рантайм
+*  Vercel ждёт именованный HTTP-метод или fetch-экспорт (default с Response
+*  игнорируется — см. WARN). */
+function GET$8() {
+	return new Response("pong");
+}
+//#endregion
+//#region server/functions/presets.ts
+/**
+* GET /api/presets — список пресетов прода (Upstash, ключи lab:preset:<name>;
+* индекс имён — lab:presets). Это НЕ локальная папка presets/ — у инстанса
+* своё множество. Битые записи возвращаются с полем error вместо state.
+*/
+async function GET$7() {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		const index = await kvReadJson(K.presetIndex) ?? [];
+		return json(200, { files: await Promise.all(index.map(async (name) => {
+			const raw = await kvReadJson(K.preset(name));
+			if (raw === null) return {
+				name,
+				error: "не удалось прочитать: пресет удалён мимо индекса"
+			};
+			const parsed = BlockStateSchema.safeParse(raw);
+			return parsed.success ? {
+				name,
+				state: parsed.data
+			} : {
+				name,
+				error: "пресет не проходит валидацию BlockState"
+			};
+		})) });
+	});
+}
+//#endregion
+//#region server/functions/presets-name.ts
+/** Имя пресета из пути /api/presets/<name> (сегмент после /presets/). */
+function presetNameFromUrl(req) {
+	return new URL(req.url).pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+}
+/** GET /api/presets/:name — один пресет (санитизация имени как в dev). */
+async function GET$6(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		const name = sanitizeName(presetNameFromUrl(req));
+		if (name === null) return json(400, { error: "имя содержит некорректную %-последовательность" });
+		if (name === "") return json(400, { error: "имя после санитизации пусто" });
+		const stored = await kvReadJson(K.preset(name));
+		if (stored === null) return json(404, { error: `пресет ${name} не найден` });
+		return json(200, stored);
+	});
+}
+/** PUT /api/presets/:name — сохранить (валидация BlockState + индекс имён). */
+async function PUT$2(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const name = sanitizeName(presetNameFromUrl(req));
+		if (name === null) return json(400, { error: "имя содержит некорректную %-последовательность" });
+		if (name === "") return json(400, { error: "имя после санитизации пусто" });
+		const state = parseStateBody(await readJsonBody(req));
+		await kvWriteJson(K.preset(name), state);
+		const index = await kvReadJson(K.presetIndex) ?? [];
+		if (!index.includes(name)) {
+			index.push(name);
+			index.sort();
+			await kvWriteJson(K.presetIndex, index);
+		}
+		return json(200, {
+			ok: true,
+			name
+		});
+	});
+}
+/** DELETE /api/presets/:name — удалить (пресет + строка индекса). */
+async function DELETE$1(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const name = sanitizeName(presetNameFromUrl(req));
+		if (name === null) return json(400, { error: "имя содержит некорректную %-последовательность" });
+		if (name === "") return json(400, { error: "имя после санитизации пусто" });
+		if (await kvReadJson(K.preset(name)) === null) return json(404, { error: `пресет ${name} не найден` });
+		await kvDelete(K.preset(name));
+		const index = await kvReadJson(K.presetIndex) ?? [];
+		const next = index.filter((n) => n !== name);
+		if (next.length !== index.length) await kvWriteJson(K.presetIndex, next);
+		return json(200, {
+			ok: true,
+			name
+		});
+	});
+}
 //#endregion
 //#region server/functions/schema.ts
 /** GET /api/schema — JSON Schema (draft 2020-12) типа BlockState, как в dev. */
-async function GET() {
+async function GET$5() {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		return json(200, {
@@ -6268,4 +7028,337 @@ async function GET() {
 	});
 }
 //#endregion
-export { GET };
+//#region server/functions/sessions.ts
+/**
+* GET /api/sessions — список сессий (открыто; Upstash-ключ lab:sessions,
+* cap 50 — при переполнении выкидываются самые неактивные). Формат:
+* {sessions: [{id, name, updatedAt}]} — новые сверху. Источник для селектора
+* хедера приложения и для агентов, выбирающих свой слот доски
+* (X-Lab-Session, см. API.md «Сессии»).
+*/
+async function GET$4() {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		return json(200, { sessions: await sessionIndex() });
+	});
+}
+//#endregion
+//#region server/functions/sessions-id.ts
+/** id из пути /api/sessions/<id> (catch-all роутер). */
+function sessionIdFromUrl(req) {
+	return new URL(req.url).pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+}
+/** id с валидацией; невалидный — HttpError 400 (формат как у X-Lab-Session). */
+async function sessionId(req) {
+	const id = sessionIdFromUrl(req);
+	if (!SESSION_ID_RE.test(id)) throw new HttpError(400, { error: `невалидный id сессии «${id}»: допустимы [a-zA-Z0-9_-], 1..64 символа` });
+	return id;
+}
+const SessionPutSchema = object({ name: string().min(1).max(64) });
+/**
+* PUT /api/sessions/<id> тело {name} — создать сессию (пустой слот) или
+* переименовать существующую. Под requireMutationAuth, как прочие мутации.
+* Создать слот можно и просто обратившись к любому эндпоинту с заголовком
+* X-Lab-Session: <id> (лениво) — PUT нужен ради осмысленного имени в списке.
+*/
+async function PUT$1(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const id = await sessionId(req);
+		const parsed = SessionPutSchema.safeParse(await readJsonBody(req));
+		if (!parsed.success) return json(400, {
+			error: "тело {name}: строка 1..64 символа",
+			issues: parsed.error.issues
+		});
+		await upsertSession(id, parsed.data.name);
+		return json(200, {
+			ok: true,
+			id,
+			name: parsed.data.name
+		});
+	});
+}
+/**
+* DELETE /api/sessions/<id> — удалить слот целиком: стейт, счётчик версий,
+* warnings, analysis и заявки (analysisReq/sweepReq жили в слоте). Единственная
+* операция, требующая существования сессии (404). Под requireMutationAuth.
+*/
+async function DELETE(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const id = await sessionId(req);
+		if (!await deleteSession(id)) return json(404, { error: `сессия ${id} не найдена` });
+		return json(200, {
+			ok: true,
+			id
+		});
+	});
+}
+//#endregion
+//#region server/functions/state.ts
+/**
+* GET /api/state — текущий стейт сессии (X-Lab-Session, default 'default';
+* несуществующая сессия создаётся лениво — пустой стейт). Без ?since — голый
+* BlockState (как в dev), 404 пока ничего не синкалось. С ?since=N —
+* поллинг-контракт: {version, state} при version > N, иначе {version: N,
+* unchanged: true} (не 404 — поллинг дешёвый: слот читается ровно 1 командой).
+* Попутно analysisRequest/sweepRequest — заявки агента (анализ таргета /
+* авто-перебор), живущие в том же слоте lab:s/<id> (замена SSE,
+* см. API.md «Прод (Vercel)» и «Сессии»).
+*/
+async function GET$3(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		const stored = await ensureSession(sessionFromRequest(req));
+		const state = stored.state !== null ? stored.state : null;
+		const version = Number.isInteger(stored.version) ? stored.version : null;
+		const analysisRequest = typeof stored.analysisReq === "string" ? stored.analysisReq : void 0;
+		const reqField = analysisRequest === void 0 ? {} : { analysisRequest };
+		const sweepField = stored.sweepReq === void 0 ? {} : { sweepRequest: stored.sweepReq };
+		const sinceRaw = new URL(req.url).searchParams.get("since");
+		if (sinceRaw === null) {
+			if (state === null || version === null) return json(404, { error: "стейт ещё не синкался: откройте приложение в браузере (оно шлёт POST /api/sync) или положите свой через PUT /api/state" });
+			return json(200, state);
+		}
+		const since = Number(sinceRaw);
+		if (!Number.isInteger(since) || since < 0) throw new HttpError(400, { error: "?since должен быть неотрицательным целым" });
+		if (state !== null && version !== null && version > since) return json(200, {
+			version,
+			state,
+			...reqField,
+			...sweepField
+		});
+		return json(200, {
+			version: since,
+			unchanged: true,
+			...reqField,
+			...sweepField
+		});
+	});
+}
+/** PUT /api/state — положить стейт в сессию (валидация zod → INCR версии → запись). */
+async function PUT(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const sessionId = sessionFromRequest(req);
+		const parsed = BlockStateSchema.safeParse(await readJsonBody(req));
+		if (!parsed.success) return json(400, {
+			error: "invalid BlockState",
+			issues: parsed.error.issues
+		});
+		return json(200, {
+			ok: true,
+			version: await writeStateVersion(sessionId, parsed.data)
+		});
+	});
+}
+//#endregion
+//#region server/functions/sweep.ts
+/**
+* POST /api/sweep — оба направления одним обработчиком, оба в контексте
+* сессии (X-Lab-Session; результат чужой сессии по id не читается — он в
+* ключе lab:s/<id>/sweep/<sweepId>):
+*  - заявка агента {field, from, to, steps} → {id}; доставка приложению —
+*    поле sweepReq того же слота lab:s/<id>, что и analysisReq (полл-тик
+*    остаётся 1 командой), плюс lab:s/<id>/sweep/<sweepId> = {req, status:'pending'};
+*  - результат приложения {id, results?, aborted?} — на прод приходит через
+*    rewrite /api/__sweep → сюда; обновляет ключ результата и стирает заявку.
+*/
+const SweepPostSchema = union([SweepReqSchema, SweepResultSchema]);
+/** Тело ответа статуса (общее для ?id= и /api/sweep/<id>). */
+function sweepPayload(id, s) {
+	return {
+		id,
+		status: s.status,
+		...s.results !== void 0 ? { results: s.results } : {},
+		...s.aborted !== void 0 ? { aborted: s.aborted } : {}
+	};
+}
+/** GET /api/sweep?id=<id> — статус/результат перебора (прод-аналог dev GET). */
+async function GET$2(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		const sessionId = sessionFromRequest(req);
+		const id = new URL(req.url).searchParams.get("id");
+		if (id === null) throw new HttpError(400, { error: "укажите ?id=<sweep id из POST /api/sweep>" });
+		if (!SWEEP_ID_RE.test(id)) throw new HttpError(400, { error: "некорректный id" });
+		const stored = await kvReadJson(K.sweep(sessionId, id));
+		if (stored === null) return json(404, { error: `sweep ${id} не найден` });
+		return json(200, sweepPayload(id, stored));
+	});
+}
+async function POST$2(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const sessionId = sessionFromRequest(req);
+		const parsed = SweepPostSchema.safeParse(await readJsonBody(req));
+		if (!parsed.success) return json(400, {
+			error: "invalid sweep payload",
+			issues: parsed.error.issues
+		});
+		const data = parsed.data;
+		if ("field" in data) {
+			const id = crypto.randomUUID();
+			await kvWriteJson(K.sweep(sessionId, id), {
+				req: data,
+				status: "pending"
+			});
+			await setSweepReq(sessionId, {
+				id,
+				req: data
+			});
+			return json(200, { id });
+		}
+		const stored = await kvReadJson(K.sweep(sessionId, data.id));
+		if (stored === null) return json(404, { error: `sweep ${data.id} не найден` });
+		const next = {
+			req: stored.req,
+			status: data.aborted !== void 0 ? "aborted" : "done"
+		};
+		if (data.results !== void 0) next.results = data.results;
+		if (data.aborted !== void 0) next.aborted = data.aborted;
+		await kvWriteJson(K.sweep(sessionId, data.id), next);
+		await clearSweepReq(sessionId, data.id);
+		return json(200, {
+			ok: true,
+			id: data.id
+		});
+	});
+}
+//#endregion
+//#region server/functions/sweep-id.ts
+/** id из пути /api/sweep/<id> (catch-all роутер; Node-функции без ctx.params). */
+function sweepIdFromUrl(req) {
+	return new URL(req.url).pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+}
+/**
+* GET /api/sweep/<id> — статус/результат перебора path-параметром (прод).
+* Query-вариант GET /api/sweep?id=<id> живёт в api/sweep.ts — ответ тот же.
+*/
+async function GET$1(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		const session = sessionFromRequest(req);
+		const id = sweepIdFromUrl(req);
+		if (!SWEEP_ID_RE.test(id)) throw new HttpError(400, { error: "некорректный id" });
+		const stored = await kvReadJson(K.sweep(session, id));
+		if (stored === null) return json(404, { error: `sweep ${id} не найден` });
+		return json(200, sweepPayload(id, stored));
+	});
+}
+//#endregion
+//#region server/functions/sync.ts
+/**
+* Тело POST /api/sync: {state: BlockState} (браузер на проде) или голый
+* BlockState (как в dev — на случай вызова в стиле dev-цикла).
+*/
+const SyncBodySchema = union([object({ state: BlockStateSchema }), BlockStateSchema]);
+/**
+* POST /api/sync (прод-аналог dev POST /api/__sync) — браузер присылает свой
+* стейт (debounce 300ms) в слот своей сессии (X-Lab-Session из sessionStorage;
+* несуществующая создаётся лениво). Сервер сам инкрементит версию и пишет;
+* ответ {ok, version} — браузер запоминает «моя версия», чтобы поллинг не
+* возвращал её же обратно (эхо-петли нет: sync ничего не броадкастит).
+*/
+async function POST$1(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const sessionId = sessionFromRequest(req);
+		const parsed = SyncBodySchema.safeParse(await readJsonBody(req));
+		if (!parsed.success) return json(400, {
+			error: "invalid BlockState",
+			issues: parsed.error.issues
+		});
+		return json(200, {
+			ok: true,
+			version: await writeStateVersion(sessionId, "state" in parsed.data ? parsed.data.state : parsed.data)
+		});
+	});
+}
+//#endregion
+//#region server/functions/warnings.ts
+/**
+* GET /api/warnings — борт-контроль старта сессии (X-Lab-Session; несуществующая
+* создаётся лениво). До первого POST — 404 с cleared:true (как в dev), чтобы
+* агент не ждал «пусто» как ошибку.
+*/
+async function GET(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		const sessionId = sessionFromRequest(req);
+		await ensureSession(sessionId);
+		const stored = await kvReadJson(K.warnings(sessionId));
+		if (stored === null) return json(404, {
+			cleared: true,
+			error: "предупреждения ещё не синкались: откройте приложение в браузере — оно шлёт POST /api/warnings"
+		});
+		return json(200, stored);
+	});
+}
+/**
+* POST /api/warnings (прод-аналог dev POST /api/__warnings) — браузер шлёт
+* предупреждения (debounce ~400ms) в слот своей сессии. Cleared-семантика как
+* в dev: payload {"cleared":true} хранится как «пусто» — GET не отдаёт
+* устаревший список.
+*/
+async function POST(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const sessionId = sessionFromRequest(req);
+		await ensureSession(sessionId);
+		const parsed = WarningsPayloadSchema.safeParse(await readJsonBody(req));
+		if (!parsed.success) return json(400, {
+			error: "invalid warnings payload",
+			issues: parsed.error.issues
+		});
+		await kvWriteJson(K.warnings(sessionId), parsed.data);
+		return json(200, { ok: true });
+	});
+}
+//#endregion
+//#region server/functions/router.ts
+/**
+* Единая прод-функция (catch-all): Hobby-план Vercel ограничивает деплой
+* 12 serverless-функциями, поэтому ВСЕ /api/* роутятся здесь по пути и методу.
+* Логика живёт в соседних модулях — этот файл только диспетчер.
+* Именованные GET/POST/PUT/DELETE — конвенция рантайма Vercel (Web-стиль).
+*/
+const MISMATCH = (method) => json(405, { error: `метод ${method} не поддерживается` });
+async function handler(req) {
+	const segments = new URL(req.url).pathname.replace(/^\/+|\/+$/g, "").split("/");
+	const resource = segments[1] ?? "";
+	const hasParam = segments.length > 2;
+	const m = req.method;
+	switch (`${m} ${resource}`) {
+		case "GET ping": return GET$8();
+		case "GET methodology": return GET$9();
+		case "GET schema": return GET$5();
+		case "GET state": return GET$3(req);
+		case "PUT state": return PUT(req);
+		case "POST sync": return POST$1(req);
+		case "GET warnings": return GET(req);
+		case "POST warnings": return POST(req);
+		case "GET analysis": return GET$11(req);
+		case "POST analysis": return POST$4(req);
+		case "GET journal": return GET$10(req);
+		case "POST journal": return POST$3(req);
+		case "DELETE journal": return DELETE$2(req);
+		case "GET presets": return hasParam ? GET$6(req) : GET$7();
+		case "PUT presets": return PUT$2(req);
+		case "DELETE presets": return DELETE$1(req);
+		case "GET sweep": return hasParam ? GET$1(req) : GET$2(req);
+		case "POST sweep": return POST$2(req);
+		case "GET sessions": return GET$4();
+		case "PUT sessions": return PUT$1(req);
+		case "DELETE sessions": return DELETE(req);
+		default: return MISMATCH(m);
+	}
+}
+//#endregion
+export { handler as default };

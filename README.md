@@ -31,6 +31,10 @@ npm run lint
 
 HTTP API для ИИ-агентов: live чтение/запись стейта, JSON-схема, warnings/analysis/journal, пресеты. Работает в двух режимах: dev — Vite-middleware на `npm run dev` (:5180, SSE); прод — функции Vercel `api/*.ts` + Upstash Redis (поллинг версий вместо SSE). Описание с curl-примерами — [API.md](./API.md).
 
+## Промт для агента
+
+Готовый мастер-промт подгонки blur-затухания (полный порядок действий: доки → сервер → материал → старт → warnings → цикл `analysis?target` по residuals/verdict → сдача Sass) — [PROMPT.md](./PROMPT.md). Скопировать агенту целиком, приложить материалы (Figma-нода или два кадра: base без эффекта + ref с эффектом). Живущей в агентской среде подсказкой служит и скилл `gradient-lab` (~/.claude/skills/gradient-lab) — он подхватывается по триггерам «fade / маска на blur / затухание» автоматически; алгоритм подгонки v2 агент получает из `GET /api/methodology`.
+
 ## Deploy
 
 `npm run build` → статика в `dist/` + функции `api/` → деплой на Vercel (framework Vite, стор Upstash — чеклист в [API.md](./API.md#прод-vercel), раздел «Setup»). На любой другой static-хостинг собирается без API — приложение полностью работает локально.

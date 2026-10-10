@@ -7,9 +7,12 @@ import {
     AnalysisPostSchema,
     BlockStateSchema,
     JournalPostSchema,
+    SweepReqSchema,
+    SweepResultSchema,
     WarningsPayloadSchema,
 } from '../src/schema.ts';
-import type { JournalEntry } from '../src/schema.ts';
+import type { JournalEntry, SweepPoint, SweepReq } from '../src/schema.ts';
+import { METHODOLOGY } from '../src/lib/methodology.ts';
 // чистые хелперы, общие с прод-функциями api/ (единый источник KNOWN_TARGET_KEYS)
 import { canonicalTargetKey, KNOWN_TARGET_KEYS, sanitizeName } from '../shared/targetKeys.ts';
 
@@ -102,6 +105,20 @@ export function agentApi(): Plugin {
     /** Кольцевой буфер журнала итераций (в памяти; DELETE /api/journal чистит). */
     let journal: JournalEntry[] = [];
     let journalSeq = 0;
+    /**
+     * Исполнение sweep (авто-перебор): заявки и результаты по id в памяти
+     * dev-сервера. Заявка доставляется приложению SSE-событием sweep-request,
+     * результат приложение шлёт POST /api/__sweep; агент поллит GET /api/sweep?id=.
+     */
+    const sweeps = new Map<
+        string,
+        {
+            req: SweepReq;
+            status: 'pending' | 'done' | 'aborted';
+            results?: SweepPoint[];
+            aborted?: string;
+        }
+    >();
     const sseClients = new Set<ServerResponse>();
 
     const presetsDir = (): string => path.resolve(root, 'presets');
@@ -143,6 +160,13 @@ export function agentApi(): Plugin {
                 title: 'BlockState',
                 ...z.toJSONSchema(BlockStateSchema),
             });
+            return;
+        }
+
+        // методика подгонки v2 — из одного места (src/lib/methodology.ts);
+        // тот же ответ отдаёт прод api/methodology.ts, стейт/Upstash не нужны
+        if (method === 'GET' && url.split('?')[0] === '/methodology') {
+            sendJson(res, 200, METHODOLOGY);
             return;
         }
 
@@ -243,6 +267,85 @@ export function agentApi(): Plugin {
             return;
         }
 
+        // авто-перебор значения (методика v2, F2): агент оставляет заявку
+        // (браузер получает SSE sweep-request и исполняет: транзиентные значения
+        // → анализ → таблица), результат принимает POST /api/__sweep, агент
+        // поллит статус GET /api/sweep?id=
+        if (method === 'POST' && url === '/sweep') {
+            const raw = await readBody(req);
+            let json: unknown;
+            try {
+                json = JSON.parse(raw);
+            } catch {
+                sendJson(res, 400, { error: 'тело запроса не является JSON' });
+                return;
+            }
+            const parsed = SweepReqSchema.safeParse(json);
+            if (!parsed.success) {
+                sendJson(res, 400, { error: 'invalid sweep request', issues: parsed.error.issues });
+                return;
+            }
+            const id = crypto.randomUUID();
+            sweeps.set(id, { req: parsed.data, status: 'pending' });
+            broadcast({ type: 'sweep-request', id, req: parsed.data });
+            sendJson(res, 200, { id });
+            return;
+        }
+
+        if (method === 'GET' && url.split('?')[0] === '/sweep') {
+            const queryStart = url.indexOf('?');
+            const query = queryStart >= 0 ? new URLSearchParams(url.slice(queryStart + 1)) : null;
+            const id = query?.get('id') ?? null;
+            if (id === null) {
+                sendJson(res, 400, { error: 'укажите ?id=<sweep id из POST /api/sweep>' });
+                return;
+            }
+            const s = sweeps.get(id);
+            if (s === undefined) {
+                sendJson(res, 404, { error: `sweep ${id} не найден (dev-сервер перезапускался?)` });
+                return;
+            }
+            sendJson(res, 200, {
+                id,
+                status: s.status,
+                ...(s.results !== undefined ? { results: s.results } : {}),
+                ...(s.aborted !== undefined ? { aborted: s.aborted } : {}),
+            });
+            return;
+        }
+
+        // браузер шлёт результат исполнения заявки: таблица точек и/или abort
+        if (method === 'POST' && url === '/__sweep') {
+            const raw = await readBody(req);
+            let json: unknown;
+            try {
+                json = JSON.parse(raw);
+            } catch {
+                sendJson(res, 400, { error: 'тело запроса не является JSON' });
+                return;
+            }
+            const parsed = SweepResultSchema.safeParse(json);
+            if (!parsed.success) {
+                sendJson(res, 400, { error: 'invalid sweep result', issues: parsed.error.issues });
+                return;
+            }
+            const data = parsed.data;
+            const s = sweeps.get(data.id);
+            if (s === undefined) {
+                sendJson(res, 404, { error: `sweep ${data.id} не найден` });
+                return;
+            }
+            if (data.results !== undefined) s.results = data.results;
+            if (data.aborted !== undefined) {
+                s.aborted = data.aborted;
+                s.status = 'aborted';
+            } else {
+                s.status = 'done';
+            }
+            sendJson(res, 200, { ok: true, id: data.id });
+            return;
+        }
+
         // браузер присылает предупреждения борт-контроля (debounce ~400ms);
         // {"cleared":true} — предупреждений нет (кэш сбрасываем, старьё не отдаём)
         if (method === 'POST' && url === '/__warnings') {
@@ -336,6 +439,9 @@ export function agentApi(): Plugin {
         if (method === 'DELETE' && url === '/journal') {
             const cleared = journal.length;
             journal = [];
+            // локальное зеркало журнала в приложении тоже чистим — иначе hint
+            // «плато радиуса» видит удалённые записи (прод: id-регрессия в App)
+            broadcast({ type: 'journal-cleared' });
             sendJson(res, 200, { ok: true, cleared });
             return;
         }

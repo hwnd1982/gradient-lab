@@ -1,4 +1,4 @@
-import type { BlockState } from '../src/schema.ts';
+import type { BlockState, SweepPoint, SweepReq } from '../src/schema.ts';
 import { HttpError, json } from './rest.ts';
 
 /**
@@ -13,7 +13,7 @@ import { HttpError, json } from './rest.ts';
 
 /** Ключи (см. API.md «Прод (Vercel) → ключи Upstash»). */
 export const K = {
-    /** {version, state, analysisReq?} — одним ключом: полл-тик = 1 команда */
+    /** {version, state, analysisReq?, sweepReq?} — одним ключом: полл-тик = 1 команда */
     state: 'lab:state',
     /** счётчик версий стейта (INCR при каждой записи) */
     statever: 'lab:statever',
@@ -23,17 +23,34 @@ export const K = {
     /** индекс имён пресетов (JSON-массив) */
     presetIndex: 'lab:presets',
     preset: (name: string): string => `lab:preset:${name}`,
+    /** результат sweep по id (TTL не нужен — перетирается следующим заходом) */
+    sweep: (id: string): string => `lab:sweep:${id}`,
 } as const;
 
+/** Заявка на авто-перебор внутри lab:state (доставка приложению поллом стейта). */
+export interface StoredSweepReq {
+    id: string;
+    req: SweepReq;
+}
+
 /**
- * Записанный в lab:state JSON: версия + стейт + заявка агента на анализ
- * таргета (analysisReq). Заявка живёт в том же ключе, чтобы полл-тик браузера
- * стоил ровно 1 команду Upstash (free-тариф — 10k команд/день).
+ * Записанный в lab:state JSON: версия + стейт + заявки агента (analysis —
+ * таргет анализа, sweep — авто-перебор). Обе живут в том же ключе, чтобы
+ * полл-тик браузера стоил ровно 1 команду Upstash (free-тариф — 10k/день).
  */
 export interface StoredState {
     version: number;
     state: BlockState | null;
     analysisReq?: string;
+    sweepReq?: StoredSweepReq;
+}
+
+/** Запись lab:sweep:<id>: заявка + статус/результат исполнения. */
+export interface StoredSweep {
+    req: SweepReq;
+    status: 'pending' | 'done' | 'aborted';
+    results?: SweepPoint[];
+    aborted?: string;
 }
 
 const NOT_CONFIGURED_ERROR = {
@@ -129,17 +146,78 @@ export async function kvDelete(key: string): Promise<void> {
 }
 
 /**
- * Записать новую версию стейта: INCR + write с сохранением ждущей заявки
- * analysisReq (синк браузера и агентский PUT не должны её затирать).
- * Возвращает присвоенную версию.
+ * Незакрытые заявки (analysisReq/sweepReq) переносятся в новую запись lab:state:
+ * синк браузера и агентский PUT не должны затирать их, пока приложение не
+ * забрало/не исполнило заявку.
+ */
+function withPending(
+    next: { version: number; state: BlockState | null },
+    prev: StoredState | null
+): StoredState {
+    const out: StoredState = { ...next };
+    if (typeof prev?.analysisReq === 'string') out.analysisReq = prev.analysisReq;
+    if (prev?.sweepReq !== undefined) out.sweepReq = prev.sweepReq;
+    return out;
+}
+
+/**
+ * Записать новую версию стейта: INCR + write с сохранением ждущих заявок
+ * analysisReq/sweepReq. Возвращает присвоенную версию.
  */
 export async function writeStateVersion(state: BlockState): Promise<number> {
     const prev = await kvReadJson<StoredState>(K.state);
     const version = await kvIncr(K.statever);
-    await kvWriteJson(K.state, {
-        version,
-        state,
-        ...(typeof prev?.analysisReq === 'string' ? { analysisReq: prev.analysisReq } : {}),
-    });
+    await kvWriteJson(K.state, withPending({ version, state }, prev));
     return version;
+}
+
+/**
+ * Положить заявку sweep в lab:state (доставка приложению поллом; версия не
+ * инкрементится — как у analysisReq) с сохранением analysisReq.
+ */
+export async function setSweepReq(req: StoredSweepReq): Promise<void> {
+    const st = await kvReadJson<StoredState>(K.state);
+    const next: StoredState = {
+        version: st?.version ?? 0,
+        state: st?.state ?? null,
+        sweepReq: req,
+    };
+    if (typeof st?.analysisReq === 'string') next.analysisReq = st.analysisReq;
+    await kvWriteJson(K.state, next);
+}
+
+/**
+ * Положить заявку анализа в lab:state (доставка приложению поллом; версия не
+ * инкрементится) с сохранением sweep-заявки. Единственный писатель analysisReq
+ * кроме clearAnalysisReq — чтобы промах GET ?target= не стирал чужую sweep-заявку.
+ * Идемпотентна: та же заявка не перезаписывается (без лишних команд).
+ */
+export async function setAnalysisReq(key: string): Promise<void> {
+    const st = await kvReadJson<StoredState>(K.state);
+    if (st !== null && st.analysisReq === key) return;
+    const next: StoredState = {
+        version: st?.version ?? 0,
+        state: st?.state ?? null,
+        analysisReq: key,
+    };
+    if (st?.sweepReq !== undefined) next.sweepReq = st.sweepReq;
+    await kvWriteJson(K.state, next);
+}
+
+/** Стереть заявку sweep по id (результат получен); анализ-заявку сохраняет. */
+export async function clearSweepReq(id: string): Promise<void> {
+    const st = await kvReadJson<StoredState>(K.state);
+    if (st === null || st.sweepReq === undefined || st.sweepReq.id !== id) return;
+    const next: StoredState = { version: st.version, state: st.state };
+    if (typeof st.analysisReq === 'string') next.analysisReq = st.analysisReq;
+    await kvWriteJson(K.state, next);
+}
+
+/** Стереть заявку анализа (свежий анализ получен); sweep-заявку сохраняет. */
+export async function clearAnalysisReq(): Promise<void> {
+    const st = await kvReadJson<StoredState>(K.state);
+    if (st === null || typeof st.analysisReq !== 'string') return;
+    const next: StoredState = { version: st.version, state: st.state };
+    if (st.sweepReq !== undefined) next.sweepReq = st.sweepReq;
+    await kvWriteJson(K.state, next);
 }

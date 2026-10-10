@@ -462,6 +462,14 @@ export function CompareSection() {
                                             </button>
                                         </div>
                                     )}
+                                    {analysis.hint !== undefined && analysis.hint !== '' && (
+                                        <p
+                                            className="text-[10px] leading-relaxed text-lab-accent"
+                                            title="«Движение к точке» — подсказка следующего шага по методике v2 (факты анализа + журнала)"
+                                        >
+                                            {analysis.hint}
+                                        </p>
+                                    )}
                                 </>
                             )}
                         </div>

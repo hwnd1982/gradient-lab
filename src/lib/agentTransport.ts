@@ -1,4 +1,5 @@
-import type { BlockState } from '../schema';
+import type { BlockState, SweepRequest } from '../schema';
+import { SweepReqSchema } from '../schema';
 
 /**
  * Единый транспорт браузер → Agent API (контракт — в API.md).
@@ -21,12 +22,14 @@ const PATHS = IS_PROD
           analysis: '/api/analysis',
           warnings: '/api/warnings',
           journal: '/api/journal',
+          sweepResult: '/api/sweep',
       }
     : {
           sync: '/api/__sync',
           analysis: '/api/__analysis',
           warnings: '/api/__warnings',
           journal: '/api/__journal',
+          sweepResult: '/api/__sweep',
       };
 
 export type AgentPath = keyof typeof PATHS;
@@ -89,6 +92,8 @@ export interface StatePoll {
     state?: unknown;
     /** заявка агента на анализ таргета (замена SSE analysis-request); стирается POST /api/analysis */
     analysisRequest?: string;
+    /** заявка агента на авто-перебор (замена SSE sweep-request); стирается POST результата */
+    sweepRequest?: SweepRequest;
 }
 
 /** Поллинг версии стейта; null — сеть недоступна. */
@@ -98,12 +103,26 @@ export async function pollState(since: number): Promise<StatePoll | null> {
         const j: unknown = await r.json();
         if (typeof j !== 'object' || j === null) return { status: r.status };
         const o = j as Record<string, unknown>;
+        // заявка sweep валидируется на месте: битую молча роняем (не наш sweep)
+        let sweepRequest: SweepRequest | undefined;
+        const sr = o.sweepRequest;
+        if (
+            typeof sr === 'object' &&
+            sr !== null &&
+            typeof (sr as { id?: unknown }).id === 'string'
+        ) {
+            const req = SweepReqSchema.safeParse((sr as { req?: unknown }).req);
+            if (req.success) {
+                sweepRequest = { id: (sr as { id: string }).id, req: req.data };
+            }
+        }
         return {
             status: r.status,
             version: typeof o.version === 'number' ? o.version : undefined,
             unchanged: o.unchanged === true,
             state: 'state' in o ? o.state : undefined,
             analysisRequest: typeof o.analysisRequest === 'string' ? o.analysisRequest : undefined,
+            sweepRequest,
         };
     } catch {
         return null;

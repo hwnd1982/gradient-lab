@@ -8,13 +8,15 @@ import { UndoIcon } from './components/icons';
 import { agentPost, agentSync, pollState } from './lib/agentTransport';
 import { computeAnalysis } from './lib/analysis';
 import { pollDelayMs } from './lib/backoff';
+import { computeHint } from './lib/hint';
 import { getCanvas, getImage } from './lib/imageCache';
+import { shouldSendSync } from './lib/syncGate';
 import { decodeState, encodeState } from './lib/shareUrl';
 import { validateStart } from './lib/validate';
-import { BlockStateSchema, defaultBlockState } from './schema';
+import { BlockStateSchema, SweepReqSchema, defaultBlockState } from './schema';
 import { readGradient, targetFromString, targetToKey } from './targets';
-import { useLabStore } from './store';
-import type { Analysis, BlockState } from './types';
+import { sameTarget, useLabStore } from './store';
+import type { Analysis, BlockState, GradientTarget, SweepPoint, SweepRequest } from './types';
 
 /** Вставка картинки из буфера (Ctrl+V) как референса сравнения. */
 function usePasteImage() {
@@ -94,7 +96,10 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
 
             const send = (): void => {
                 const state = useLabStore.getState().state;
-                lastSyncJson = JSON.stringify(state);
+                const json = JSON.stringify(state);
+                // контент не менялся (sweep восстановил исходное) — не шлём
+                if (json === lastSyncJson) return;
+                lastSyncJson = json;
                 void agentSync(state).then((version) => {
                     if (version === null) {
                         // не дошло — эхо-чек по этой строке не валиден
@@ -116,6 +121,13 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
                 ) {
                     return;
                 }
+                // sweep исполняется — входящие стейты не применяем; версию при
+                // этом adopting сам poll (после applyForeign ставит
+                // lastKnownVersion), выдача НЕ переиграется — PUT во время
+                // sweep осознанно теряется до финального синка (протокол агента
+                // в API.md: до done/aborted не PUT-ить, GET в это время честен —
+                // транзиенты на сервер не уходят, см. shouldSendSync)
+                if (useLabStore.getState().sweeping) return;
                 const parsed = BlockStateSchema.safeParse(state);
                 if (!parsed.success) return;
                 // ссылка применяемого объекта: подписка по ней не шлёт /api/sync
@@ -154,6 +166,11 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
                     const t = targetFromString(res.analysisRequest);
                     if (t !== null) setAnalysisTarget(t);
                 }
+                if (res.sweepRequest !== undefined) {
+                    // заявка на авто-перебор (POST /api/sweep): исполняет
+                    // useSweepSync; повторные доставки того же id — no-op в сторе
+                    useLabStore.getState().requestSweep(res.sweepRequest);
+                }
                 if (res.version !== undefined && res.version > lastKnownVersion) {
                     if (res.state !== undefined && !res.unchanged) {
                         if (firstPoll && hashLoadedRef.current) {
@@ -179,7 +196,10 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
             document.addEventListener('visibilitychange', onVisibility);
 
             const unsubscribe = useLabStore.subscribe((s, prev) => {
-                if (s.state === prev.state) return;
+                // транзиентные sweep-значения не синкаются (команды/версии не
+                // тратятся, GET во время sweep отдаёт исходный стейт); конец
+                // sweep — досылаем финальный контент (см. syncGate.ts)
+                if (!shouldSendSync(s, prev)) return;
                 if (s.state === justAppliedRef.current) return;
                 window.clearTimeout(timer);
                 timer = window.setTimeout(send, 300);
@@ -196,7 +216,9 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
 
         // ── dev: как раньше — middleware + SSE ──
         const unsubscribe = useLabStore.subscribe((s, prev) => {
-            if (s.state === prev.state) return;
+            // транзиентные sweep-значения не синкаются; конец sweep — досылка
+            // финального контента (восстановленный радиус / правка юзера)
+            if (!shouldSendSync(s, prev)) return;
             // стейт просто применён из SSE-события агентского PUT — эхо не шлём:
             // сервер уже знает этот стейт, а гонка echo/PUT портила поля;
             // юзерские правки ПОВЕРХ применённого — новый объект, синкается как обычно
@@ -204,6 +226,8 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
             window.clearTimeout(timer);
             timer = window.setTimeout(() => {
                 const json = JSON.stringify(useLabStore.getState().state);
+                // контент не менялся (sweep восстановил исходное) — не шлём
+                if (json === lastSyncJson) return;
                 lastSyncJson = json;
                 fetch('/api/__sync', {
                     method: 'POST',
@@ -224,7 +248,13 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
             skipInitialEvent = hashLoadedRef.current;
             es = new EventSource('/api/events');
             es.onmessage = (ev: MessageEvent<string>) => {
-                let msg: { type?: string; state?: unknown; target?: unknown };
+                let msg: {
+                    type?: string;
+                    state?: unknown;
+                    target?: unknown;
+                    id?: unknown;
+                    req?: unknown;
+                };
                 try {
                     msg = JSON.parse(ev.data);
                 } catch {
@@ -238,7 +268,30 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>) {
                     }
                     return;
                 }
+                // заявка на авто-перебор (POST /api/sweep): исполняет useSweepSync
+                if (msg.type === 'sweep-request') {
+                    if (
+                        typeof msg.id === 'string' &&
+                        typeof msg.req === 'object' &&
+                        msg.req !== null
+                    ) {
+                        const parsed = SweepReqSchema.safeParse(msg.req);
+                        if (parsed.success) {
+                            useLabStore.getState().requestSweep({ id: msg.id, req: parsed.data });
+                        }
+                    }
+                    return;
+                }
+                // агент очистил журнал (DELETE /api/journal) — локальное зеркало
+                // тоже чистим, иначе hint «плато радиуса» видит удалённые записи
+                if (msg.type === 'journal-cleared') {
+                    useLabStore.getState().clearJournal();
+                    return;
+                }
                 if (msg.type !== 'state' || msg.state === undefined) return;
+                // sweep исполняется — входящие стейты не применяем до завершения
+                // (PUT до done/aborted sweep — нарушение протокола агента, API.md)
+                if (useLabStore.getState().sweeping) return;
                 if (skipInitialEvent) {
                     skipInitialEvent = false;
                     hashLoadedRef.current = false;
@@ -345,6 +398,8 @@ function useJournalSync() {
             id: number,
             after: NonNullable<ReturnType<typeof journalMetrics>>
         ): void => {
+            // зеркало хвоста журнала в стор — источник фактов для computeHint
+            useLabStore.getState().completeJournalEntry(id, after);
             post({ id, after });
         };
 
@@ -357,6 +412,21 @@ function useJournalSync() {
                 .then((r) => (r !== null && r.ok ? r.json() : null))
                 .then((j: { id?: unknown } | null) => {
                     if (j === null || typeof j.id !== 'number') return;
+                    // серверный журнал очищен (DELETE агентом / рестарт dev) —
+                    // id пошли заново: локальное зеркало сбрасываем, чтобы hint
+                    // не детектил «плато» по удалённым записям (в dev то же
+                    // приходит мгновенно SSE-событием journal-cleared)
+                    const mirror = useLabStore.getState().journalEntries;
+                    if (mirror.length > 0 && j.id <= mirror[mirror.length - 1].id) {
+                        useLabStore.getState().clearJournal();
+                    }
+                    useLabStore.getState().pushJournalEntry({
+                        id: j.id,
+                        ts: body.ts,
+                        fields: body.fields,
+                        before: body.before ?? null,
+                        after: null,
+                    });
                     // анализ уже успел посчитаться после правки — дозаполняем сразу
                     if (afterCandidate !== null) {
                         finish(j.id, afterCandidate);
@@ -375,6 +445,9 @@ function useJournalSync() {
 
         const unsubscribe = useLabStore.subscribe((s, prev) => {
             if (s.state === prev.state) return;
+            // транзиентные sweep-значения в журнал не пишем: это не итерации
+            // подбора, а авто-перебор одной ручки (результат — в /api/sweep)
+            if (s.sweeping) return;
             // «до» берём синхронно: анализ в этот момент ещё не пересчитан
             const paths: string[] = [];
             diffPaths(prev.state, s.state, '', 0, paths);
@@ -390,6 +463,8 @@ function useJournalSync() {
 
         const unsubscribeAnalysis = useLabStore.subscribe((s, prev) => {
             if (s.analysis === prev.analysis) return;
+            // метрики транзиентных sweep-точек не дозаполняют after чужих записей
+            if (s.sweeping) return;
             if (s.analysis === null || s.analysis.updatedAt === beforeAnalysisAt) return;
             const metrics = journalMetrics(s.analysis);
             if (metrics === null) return;
@@ -490,8 +565,14 @@ function useAnalysisSync() {
                 ) {
                     return;
                 }
-                setAnalysis(data, diff);
-                void agentPost('analysis', data);
+                // «движение к точке» (методика v2): подсказка перехода фазы по
+                // фактам анализа + хвоста журнала — уходит и в UI, и агенту
+                const withHint: Analysis = {
+                    ...data,
+                    hint: computeHint(data, now.journalEntries),
+                };
+                setAnalysis(withHint, diff);
+                void agentPost('analysis', withHint);
             } catch {
                 // референс не загрузился — анализ недоступен
                 clearAnalysis();
@@ -518,6 +599,155 @@ function useAnalysisSync() {
             window.clearTimeout(timer);
         };
     }, [setAnalysis, setAnalysisMarker]);
+}
+
+/** linspace: от from до to включительно, steps точек. */
+function linspace(from: number, to: number, steps: number): number[] {
+    if (steps <= 1 || from === to) return [from];
+    const out: number[] = [];
+    for (let i = 0; i < steps; i++) {
+        out.push(from + ((to - from) * i) / (steps - 1));
+    }
+    return out;
+}
+
+/** Исход ожидания анализа внутри sweep: метрика / чужое вмешательство / таймаут. */
+type SweepWait =
+    { kind: 'analysis'; analysis: Analysis } | { kind: 'foreign' } | { kind: 'timeout' };
+
+/**
+ * Исполнение заявки авто-перебора (POST /api/sweep → SSE sweep-request в dev /
+ * поле sweepRequest полла в прод → стор → этот хук): для каждого значения из
+ * linspace(from, to, steps) — транзиентное применение blur.radius (без истории,
+ * applySweepValue), ожидание пересчитанного анализа (~600ms debounce + расчёт),
+ * снятие {value, zoneMatchPercent, maxError}; в конце исходный радиус
+ * восстанавливается и результат уходит POST /api/__sweep. Чужое изменение
+ * стейта/таргета (юзер вмешался — сравнение по ссылкам, как в анализе) = abort
+ * БЕЗ восстановления (не затираем чужую правку); результат всё равно отдаётся
+ * (частичный + причина). Агент поллит GET /api/sweep?id=... Журнал, warnings и
+ * входящие/исходящие синки во время sweep молчат (флаг sweeping, syncGate).
+ * Вторая заявка во время активного sweep отклоняется сразу (POST aborted) —
+ * агент не зависает в pending.
+ */
+function useSweepSync() {
+    useEffect(() => {
+        let disposed = false;
+        // последняя разобранная заявка: повторные доставки полла — не рестарт
+        let lastId: string | null = null;
+
+        const waitForAnalysis = (
+            afterTs: number,
+            ours: BlockState,
+            target0: GradientTarget
+        ): Promise<SweepWait> =>
+            new Promise((resolve) => {
+                const started = Date.now();
+                const tick = (): void => {
+                    if (disposed) {
+                        resolve({ kind: 'timeout' });
+                        return;
+                    }
+                    const st = useLabStore.getState();
+                    if (st.state !== ours) {
+                        resolve({ kind: 'foreign' });
+                        return;
+                    }
+                    // юзер переключил таргет анализа — метрики будут чужие
+                    if (!sameTarget(st.analysisTarget ?? st.activeTarget, target0)) {
+                        resolve({ kind: 'foreign' });
+                        return;
+                    }
+                    const a = st.analysis;
+                    if (a !== null && a.updatedAt > afterTs) {
+                        resolve({ kind: 'analysis', analysis: a });
+                        return;
+                    }
+                    if (Date.now() - started > 10_000) {
+                        resolve({ kind: 'timeout' });
+                        return;
+                    }
+                    window.setTimeout(tick, 120);
+                };
+                tick();
+            });
+
+        const run = async (request: SweepRequest): Promise<void> => {
+            const { id, req } = request;
+            const store = useLabStore.getState();
+            const original = store.state.blur.radius;
+            const target0 = store.analysisTarget ?? store.activeTarget;
+            store.setSweeping(true);
+            const results: SweepPoint[] = [];
+            let aborted: string | null = null;
+            let ours: BlockState | null = null;
+            try {
+                for (const value of linspace(req.from, req.to, req.steps)) {
+                    useLabStore.getState().applySweepValue(req.field, value);
+                    ours = useLabStore.getState().state;
+                    const wait = await waitForAnalysis(Date.now(), ours, target0);
+                    if (wait.kind === 'foreign') {
+                        aborted = `state/таргет изменён вне sweep (юзер/агент) на value=${value}; исходный радиус не восстановлен`;
+                        break;
+                    }
+                    if (wait.kind === 'timeout') {
+                        aborted = 'анализ не пересчитался за 10 с (нет референса?)';
+                        break;
+                    }
+                    results.push({
+                        value: Math.round(value * 10) / 10,
+                        zoneMatchPercent: wait.analysis.zoneMatchPercent,
+                        maxError: wait.analysis.maxError,
+                    });
+                }
+                if (aborted === null && ours !== null) {
+                    // окно между последним анализом и восстановлением тоже проверяем
+                    if (useLabStore.getState().state !== ours) {
+                        aborted =
+                            'state изменён вне sweep после последней точки; исходный радиус не восстановлен';
+                    } else {
+                        useLabStore.getState().applySweepValue(req.field, original);
+                    }
+                }
+            } finally {
+                useLabStore.getState().setSweeping(false);
+                useLabStore.getState().setSweepRequest(null);
+            }
+            if (aborted !== null) {
+                console.warn('gradient-lab: sweep aborted:', aborted);
+            }
+            // частичные точки при abort тоже полезны агенту (коридор видно)
+            const body =
+                aborted === null
+                    ? { id, results }
+                    : results.length > 0
+                      ? { id, results, aborted }
+                      : { id, aborted };
+            void agentPost('sweepResult', body);
+        };
+
+        const unsubscribe = useLabStore.subscribe((s, prev) => {
+            if (s.sweepRequest === prev.sweepRequest) return;
+            const r = s.sweepRequest;
+            if (r === null || r.id === lastId) return;
+            lastId = r.id;
+            // вторая заявка во время активного sweep: отклоняем сразу — иначе
+            // агент висит в pending (dev-заявка не повторяется как прод-полл)
+            if (useLabStore.getState().sweeping) {
+                console.warn('gradient-lab: sweep уже идёт, заявка отклонена:', r.id);
+                void agentPost('sweepResult', {
+                    id: r.id,
+                    aborted: 'sweep уже выполняется (одна заявка за раз), повторите позже',
+                });
+                return;
+            }
+            void run(r);
+        });
+
+        return () => {
+            disposed = true;
+            unsubscribe();
+        };
+    }, []);
 }
 
 /**
@@ -590,10 +820,15 @@ function useWarningsSync() {
             if (
                 s.state === prev.state &&
                 s.analysis === prev.analysis &&
-                s.activeTarget === prev.activeTarget
+                s.activeTarget === prev.activeTarget &&
+                s.sweeping === prev.sweeping
             ) {
                 return;
             }
+            // транзиентные sweep-значения не пересчитываем (шум вроде
+            // blur-zero-radius при проходе через 0); конец sweep (sweeping →
+            // false) пересчитывает на финальном — восстановленном — стейте
+            if (s.sweeping) return;
             schedule();
         });
         schedule();
@@ -679,6 +914,7 @@ export default function App() {
     useAgentSync(hashLoadedRef);
     useJournalSync();
     useAnalysisSync();
+    useSweepSync();
     useWarningsSync();
     useShortcuts();
     useHashState(hashLoadedRef);

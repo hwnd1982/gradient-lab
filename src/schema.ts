@@ -289,6 +289,12 @@ export const AnalysisSchema = z.object({
     residuals: z.array(AnalysisResidualSchema),
     /** человеческая сводка «что править в первую очередь» */
     verdict: z.string(),
+    /**
+     * «Движение к точке» (методика v2): подсказка следующего шага по фактам
+     * анализа + журнала. Считает приложение (computeHint) и отдаёт с анализом;
+     * агенту — готовый переход фазы, юзеру — строка внизу панели анализа.
+     */
+    hint: z.string().optional(),
     /** Date.now() на момент расчёта */
     updatedAt: z.number(),
 });
@@ -320,6 +326,30 @@ export const AnalysisPostSchema = z.union([
     AnalysisMarkerSchema,
 ]);
 export type AnalysisPost = z.infer<typeof AnalysisPostSchema>;
+
+/** Фаза методики подгонки v2 (GET /api/methodology). */
+export const MethodologyPhaseSchema = z.object({
+    id: z.enum(['F0', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6']),
+    title: z.string(),
+    actions: z.array(z.string()),
+    /** выход из фазы, включая запрет возврата к зафиксированным ручкам */
+    exit: z.string(),
+});
+export type MethodologyPhase = z.infer<typeof MethodologyPhaseSchema>;
+
+/**
+ * Методика подгонки v2 — исполняемая процедура из одного места
+ * (src/lib/methodology.ts): фазы F0–F6 + инварианты + тот же текст одним
+ * блоком. Отдают dev-middleware и прод api/methodology.ts.
+ */
+export const MethodologySchema = z.object({
+    version: z.literal(2),
+    phases: z.array(MethodologyPhaseSchema),
+    invariants: z.array(z.string()),
+    /** та же процедура одним текстовым блоком (зеркало раздела API.md) */
+    text: z.string(),
+});
+export type Methodology = z.infer<typeof MethodologySchema>;
 
 /** Предупреждение борт-контроля старта (GET /api/warnings). */
 export const WarningSchema = z.object({
@@ -378,6 +408,46 @@ export const JournalPostSchema = z.union([
     }),
 ]);
 export type JournalPost = z.infer<typeof JournalPostSchema>;
+
+/** Поле авто-перебора /api/sweep (v2: пока только радиус blur). */
+export const SweepFieldSchema = z.literal('blur.radius');
+export type SweepField = z.infer<typeof SweepFieldSchema>;
+
+/** Тело POST /api/sweep: заявка агента на авто-перебор значения одной командой. */
+export const SweepReqSchema = z.object({
+    field: SweepFieldSchema,
+    from: z.number(),
+    to: z.number(),
+    steps: z.number().int().min(2).max(12),
+});
+export type SweepReq = z.infer<typeof SweepReqSchema>;
+
+/** Заявка sweep, доставляемая приложению (SSE sweep-request в dev, поле sweepRequest полла в прод). */
+export type SweepRequest = { id: string; req: SweepReq };
+
+/** Точка sweep-таблицы: значение поля + метрики пересчитанного анализа. */
+export const SweepPointSchema = z.object({
+    value: z.number(),
+    zoneMatchPercent: z.number(),
+    maxError: z.number(),
+});
+export type SweepPoint = z.infer<typeof SweepPointSchema>;
+
+/**
+ * Тело POST /api/__sweep: результат исполнения заявки приложением — таблица
+ * точек и/или abort (стейт изменился не транзиентным путём: юзер/агент
+ * вмешались). Refine: хотя бы одно из results/aborted.
+ */
+export const SweepResultSchema = z
+    .object({
+        id: z.string().min(1),
+        results: z.array(SweepPointSchema).optional(),
+        aborted: z.string().optional(),
+    })
+    .refine((r) => r.results !== undefined || r.aborted !== undefined, {
+        message: 'результат sweep должен содержать results или aborted',
+    });
+export type SweepResult = z.infer<typeof SweepResultSchema>;
 
 /** UI анимации — следующий этап. */
 const AnimSpecSchema = z.object({

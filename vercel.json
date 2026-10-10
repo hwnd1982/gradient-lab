@@ -7,6 +7,7 @@
         { "source": "/api/__sync", "destination": "/api/sync" },
         { "source": "/api/__analysis", "destination": "/api/analysis" },
         { "source": "/api/__warnings", "destination": "/api/warnings" },
-        { "source": "/api/__journal", "destination": "/api/journal" }
+        { "source": "/api/__journal", "destination": "/api/journal" },
+        { "source": "/api/__sweep", "destination": "/api/sweep" }
     ]
 }

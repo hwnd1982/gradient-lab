@@ -1,7 +1,17 @@
 import { create } from 'zustand';
 import { defaultBlockState } from './schema';
 import { readGradient } from './targets';
-import type { Analysis, BlockState, Gradient, GradientTarget, Warning } from './types';
+import type {
+    Analysis,
+    BlockState,
+    Gradient,
+    GradientTarget,
+    JournalEntry,
+    JournalMetrics,
+    SweepField,
+    SweepRequest,
+    Warning,
+} from './types';
 
 const MAX_HISTORY = 50;
 
@@ -64,8 +74,8 @@ function fitValues(
 /** Ключ последнего применённого fit-а: пересчёт только при смене w/h/вьюпорта. */
 let fitKey = '';
 
-/** Один и тот же таргет (kind + index слоя)? */
-function sameTarget(a: GradientTarget, b: GradientTarget): boolean {
+/** Один и тот же таргет (kind + index слоя)? Экспорт — общий хелпер для App. */
+export function sameTarget(a: GradientTarget, b: GradientTarget): boolean {
     if (a.kind !== b.kind) return false;
     if (a.kind === 'layer' && b.kind === 'layer') return a.index === b.index;
     return true;
@@ -115,6 +125,19 @@ interface LabStore {
     analysisTarget: GradientTarget | null;
     /** предупреждения борт-контроля (не сериализуются) */
     warnings: Warning[];
+    /**
+     * Заявка на авто-перебор (POST /api/sweep агента): приезжает SSE-событием
+     * sweep-request (dev) или полем sweepRequest полла (прод), исполняет
+     * useSweepSync. Повтор той же заявки (полл ещё не видел результата) — no-op.
+     */
+    sweepRequest: SweepRequest | null;
+    /** идёт исполнение sweep: транзиентные значения, журнал и входящие стейты молчат */
+    sweeping: boolean;
+    /**
+     * Хвост журнала итераций — зеркало записей, которые приложение само шлёт
+     * на сервер (id/ts/fields/before/after); нужен для computeHint. Cap 50.
+     */
+    journalEntries: JournalEntry[];
     /** режим профиля анализа: axis — вдоль оси, columns — P60 колонок, rays — 16 лучей radial */
     analysisProfile: 'axis' | 'columns' | 'rays';
     /** эффективный канвасный зум стейджа, % (100 = натуральный размер); view-only */
@@ -143,6 +166,25 @@ interface LabStore {
     setAnalysisMarker(m: 'gradientMissing' | null): void;
     setAnalysisTarget(t: GradientTarget | null): void;
     setWarnings(w: Warning[]): void;
+    /** Принять заявку sweep (повтор того же id — no-op). */
+    requestSweep(r: SweepRequest): void;
+    setSweepRequest(r: SweepRequest | null): void;
+    setSweeping(v: boolean): void;
+    /**
+     * Транзиентное применение sweep-значения: без истории (восстановление
+     * исходного значения — тем же экшеном); журнал по флагу sweeping молчит.
+     */
+    applySweepValue(field: SweepField, value: number): void;
+    /** Зеркало журнала: новая запись приложения (start). */
+    pushJournalEntry(entry: JournalEntry): void;
+    /** Зеркало журнала: дозаполнить after (finish). */
+    completeJournalEntry(id: number, after: JournalMetrics): void;
+    /**
+     * Сбросить локальное зеркало журнала (агент очистил серверный DELETE
+     * /api/journal или dev-сервер перезапустился — id пошли заново). Иначе
+     * computeHint детектил «плато радиуса» по удалённым записям.
+     */
+    clearJournal(): void;
     setAnalysisProfile(v: 'axis' | 'columns' | 'rays'): void;
     /**
      * Зум стейджа, %; anchor — точка ВЬЮПОРТА, остающаяся на месте (зум к
@@ -189,6 +231,9 @@ export const useLabStore = create<LabStore>()((set, get) => {
         analysisMarker: null,
         analysisTarget: null,
         warnings: [],
+        sweepRequest: null,
+        sweeping: false,
+        journalEntries: [],
         analysisProfile: 'axis',
         viewZoom: 100,
         viewFit: true, // старт и пресеты — всегда Fit
@@ -255,6 +300,30 @@ export const useLabStore = create<LabStore>()((set, get) => {
             set({ analysisTarget: t, analysisProfile: 'axis' });
         },
         setWarnings: (w) => set({ warnings: w }),
+        // повторная доставка той же заявки (полл не видел результата) — no-op
+        requestSweep: (r) =>
+            set((s) =>
+                s.sweepRequest !== null && s.sweepRequest.id === r.id ? {} : { sweepRequest: r }
+            ),
+        setSweepRequest: (r) => set({ sweepRequest: r }),
+        setSweeping: (v) => set({ sweeping: v }),
+        // transient: история не пишется — восстановление исходного значения тем же экшеном
+        applySweepValue: (field, value) => {
+            get().update(
+                (d) => {
+                    // единственное sweep-поле v2 — радиус blur (SweepFieldSchema)
+                    if (field === 'blur.radius') d.blur.radius = value;
+                },
+                { transient: true }
+            );
+        },
+        pushJournalEntry: (entry) =>
+            set((s) => ({ journalEntries: [...s.journalEntries, entry].slice(-50) })),
+        completeJournalEntry: (id, after) =>
+            set((s) => ({
+                journalEntries: s.journalEntries.map((e) => (e.id === id ? { ...e, after } : e)),
+            })),
+        clearJournal: () => set({ journalEntries: [] }),
         // зум-к-точке: контент-точка c = (anchor - pan)/z остаётся под anchor при
         // новом зуме z' => pan' = anchor - (anchor - pan)·(z'/z); итоговый пан
         // клампится, чтобы блок не уехал из вьюпорта совсем

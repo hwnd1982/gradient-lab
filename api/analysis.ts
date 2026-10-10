@@ -1,7 +1,15 @@
 import { AnalysisPostSchema } from '../src/schema.ts';
 import { canonicalTargetKey, KNOWN_TARGET_KEYS } from '../shared/targetKeys.ts';
-import { configured, kvDelete, kvReadJson, kvWriteJson, K, notConfigured } from '../server/kv.ts';
-import type { StoredState } from '../server/kv.ts';
+import {
+    clearAnalysisReq,
+    configured,
+    kvDelete,
+    kvReadJson,
+    kvWriteJson,
+    K,
+    notConfigured,
+    setAnalysisReq,
+} from '../server/kv.ts';
 import { json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
 
 /** Кэш анализа: полный Analysis или маркер — у обоих есть поле target. */
@@ -45,14 +53,8 @@ export async function GET(req: Request): Promise<Response> {
             return json(200, stored);
         }
         requireMutationAuth(req);
-        const st = await kvReadJson<StoredState>(K.state);
-        if (st?.analysisReq !== key) {
-            await kvWriteJson(K.state, {
-                version: st?.version ?? 0,
-                state: st?.state ?? null,
-                analysisReq: key,
-            });
-        }
+        // заявка — только через хелпер: inline-запись стирала бы чужую sweep-заявку
+        await setAnalysisReq(key);
         return json(404, {
             error: `анализ для target=${key} запрошен у приложения (заявка analysisReq в lab:state, браузер подхватит поллингом ≤10 с); повторите GET через ~5 с, пока ответ не придёт с этим target`,
             requested: key,
@@ -79,11 +81,9 @@ export async function POST(req: Request): Promise<Response> {
             return json(200, { ok: true });
         }
         await kvWriteJson(K.analysis, parsed.data);
-        // свежий анализ (или маркер) закрывает заявку: стираем analysisReq
-        const st = await kvReadJson<StoredState>(K.state);
-        if (st !== null && typeof st.analysisReq === 'string') {
-            await kvWriteJson(K.state, { version: st.version, state: st.state });
-        }
+        // свежий анализ (или маркер) закрывает заявку: стираем analysisReq;
+        // заявку sweep не трогаем — она ждёт исполнения приложения
+        await clearAnalysisReq();
         return json(200, { ok: true });
     });
 }

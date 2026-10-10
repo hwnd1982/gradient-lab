@@ -7233,9 +7233,10 @@ async function POST$2(req) {
 }
 //#endregion
 //#region server/functions/sweep-id.ts
-/** id из пути /api/sweep/<id> (catch-all роутер; Node-функции без ctx.params). */
-function sweepIdFromUrl(req) {
-	return new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/")[2] ?? "";
+/** id из query (?id=...) — прод-rewrite /api/sweep/:id доставляется запросом
+*  /api/sweep?id=... (catch-all [[...path]] матчит только один сегмент). */
+function sweepIdFromQuery(req) {
+	return new URL(req.url, "http://localhost").searchParams.get("id") ?? "";
 }
 /**
 * GET /api/sweep/<id> — статус/результат перебора path-параметром (прод).
@@ -7245,7 +7246,7 @@ async function GET$1(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		const session = sessionFromRequest(req);
-		const id = sweepIdFromUrl(req);
+		const id = sweepIdFromQuery(req);
 		if (!SWEEP_ID_RE.test(id)) throw new HttpError(400, { error: "некорректный id" });
 		const stored = await kvReadJson(K.sweep(session, id));
 		if (stored === null) return json(404, { error: `sweep ${id} не найден` });

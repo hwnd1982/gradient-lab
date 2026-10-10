@@ -3,10 +3,10 @@ import { K, configured, kvReadJson, notConfigured } from '../kv.ts';
 import type { StoredSweep } from '../kv.ts';
 import { HttpError, json, route, sessionFromRequest, SWEEP_ID_RE } from '../rest.ts';
 
-/** id из пути /api/sweep/<id> (catch-all роутер; Node-функции без ctx.params). */
-function sweepIdFromUrl(req: Request): string {
-    const segments = new URL(req.url, 'http://localhost').pathname.replace(/^\/+|\/+$/g, '').split('/');
-    return segments[2] ?? '';
+/** id из query (?id=...) — прод-rewrite /api/sweep/:id доставляется запросом
+ *  /api/sweep?id=... (catch-all [[...path]] матчит только один сегмент). */
+function sweepIdFromQuery(req: Request): string {
+    return new URL(req.url, 'http://localhost').searchParams.get('id') ?? '';
 }
 
 /**
@@ -17,7 +17,7 @@ export async function GET(req: Request): Promise<Response> {
     return route(async () => {
         if (!configured()) return notConfigured();
         const session = sessionFromRequest(req);
-        const id = sweepIdFromUrl(req);
+        const id = sweepIdFromQuery(req);
         if (!SWEEP_ID_RE.test(id)) {
             throw new HttpError(400, { error: 'некорректный id' });
         }

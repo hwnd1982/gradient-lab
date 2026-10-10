@@ -1,5 +1,5 @@
-import { AnalysisPostSchema } from '../src/schema';
-import { canonicalTargetKey, KNOWN_TARGET_KEYS } from '../shared/targetKeys';
+import { AnalysisPostSchema } from '../src/schema.ts';
+import { canonicalTargetKey, KNOWN_TARGET_KEYS } from '../shared/targetKeys.ts';
 import {
     clearAnalysisReq,
     configured,
@@ -9,8 +9,8 @@ import {
     K,
     notConfigured,
     setAnalysisReq,
-} from '../server/kv';
-import { json, readJsonBody, requireMutationAuth, route } from '../server/rest';
+} from '../server/kv.ts';
+import { json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
 
 /** Кэш анализа: полный Analysis или маркер — у обоих есть поле target. */
 interface StoredAnalysis {
@@ -86,10 +86,4 @@ export async function POST(req: Request): Promise<Response> {
         await clearAnalysisReq();
         return json(200, { ok: true });
     });
-}
-
-export default async function handler(req: Request): Promise<Response> {
-    if (req.method === 'GET') return GET(req);
-    if (req.method === 'POST') return POST(req);
-    return json(405, { error: `метод ${req.method} не поддерживается` });
 }

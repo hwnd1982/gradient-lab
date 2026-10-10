@@ -1,7 +1,7 @@
-import type { WarningsPayload } from '../src/schema';
-import { WarningsPayloadSchema } from '../src/schema';
-import { K, configured, kvReadJson, kvWriteJson, notConfigured } from '../server/kv';
-import { json, readJsonBody, requireMutationAuth, route } from '../server/rest';
+import type { WarningsPayload } from '../src/schema.ts';
+import { WarningsPayloadSchema } from '../src/schema.ts';
+import { K, configured, kvReadJson, kvWriteJson, notConfigured } from '../server/kv.ts';
+import { json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
 
 /**
  * GET /api/warnings — борт-контроль старта. До первого POST — 404 с
@@ -37,10 +37,4 @@ export async function POST(req: Request): Promise<Response> {
         await kvWriteJson(K.warnings, parsed.data);
         return json(200, { ok: true });
     });
-}
-
-export default async function handler(req: Request): Promise<Response> {
-    if (req.method === 'GET') return GET();
-    if (req.method === 'POST') return POST(req);
-    return json(405, { error: `метод ${req.method} не поддерживается` });
 }

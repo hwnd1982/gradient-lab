@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { BlockStateSchema } from '../src/schema';
-import { configured, notConfigured } from '../server/kv';
-import { json, route } from '../server/rest';
+import { BlockStateSchema } from '../src/schema.ts';
+import { configured, notConfigured } from '../server/kv.ts';
+import { json, route } from '../server/rest.ts';
 
 /** GET /api/schema — JSON Schema (draft 2020-12) типа BlockState, как в dev. */
 export async function GET(): Promise<Response> {
@@ -13,8 +13,4 @@ export async function GET(): Promise<Response> {
             ...z.toJSONSchema(BlockStateSchema),
         });
     });
-}
-
-export default async function handler(): Promise<Response> {
-    return GET();
 }

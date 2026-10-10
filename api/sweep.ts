@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { SweepReqSchema, SweepResultSchema } from '../src/schema';
+import { SweepReqSchema, SweepResultSchema } from '../src/schema.ts';
 import {
     K,
     clearSweepReq,
@@ -8,9 +8,9 @@ import {
     kvWriteJson,
     notConfigured,
     setSweepReq,
-} from '../server/kv';
-import type { StoredSweep } from '../server/kv';
-import { HttpError, json, readJsonBody, requireMutationAuth, route } from '../server/rest';
+} from '../server/kv.ts';
+import type { StoredSweep } from '../server/kv.ts';
+import { HttpError, json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
 
 /** id sweep — uuid (crypto.randomUUID), в ключе Upstash допустимы [a-zA-Z0-9-]. */
 const SWEEP_ID_RE = /^[a-zA-Z0-9-]+$/;
@@ -95,10 +95,4 @@ export async function POST(req: Request): Promise<Response> {
         await clearSweepReq(data.id);
         return json(200, { ok: true, id: data.id });
     });
-}
-
-export default async function handler(req: Request): Promise<Response> {
-    if (req.method === 'GET') return GET(req);
-    if (req.method === 'POST') return POST(req);
-    return json(405, { error: `метод ${req.method} не поддерживается` });
 }

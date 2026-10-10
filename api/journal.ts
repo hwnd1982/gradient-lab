@@ -1,7 +1,7 @@
-import type { JournalEntry } from '../src/schema';
-import { JournalPostSchema } from '../src/schema';
-import { K, configured, kvDelete, kvReadJson, kvWriteJson, notConfigured } from '../server/kv';
-import { json, readJsonBody, requireMutationAuth, route } from '../server/rest';
+import type { JournalEntry } from '../src/schema.ts';
+import { JournalPostSchema } from '../src/schema.ts';
+import { K, configured, kvDelete, kvReadJson, kvWriteJson, notConfigured } from '../server/kv.ts';
+import { json, readJsonBody, requireMutationAuth, route } from '../server/rest.ts';
 
 /** Вместимость журнала (как кольцевой буфер dev-сервера). */
 const JOURNAL_LIMIT = 200;
@@ -69,11 +69,4 @@ export async function DELETE(req: Request): Promise<Response> {
         await kvDelete(K.journal);
         return json(200, { ok: true, cleared: entries.length });
     });
-}
-
-export default async function handler(req: Request): Promise<Response> {
-    if (req.method === 'GET') return GET();
-    if (req.method === 'POST') return POST(req);
-    if (req.method === 'DELETE') return DELETE(req);
-    return json(405, { error: `метод ${req.method} не поддерживается` });
 }

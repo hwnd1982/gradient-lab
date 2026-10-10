@@ -1,6 +1,6 @@
-import { BlockStateSchema } from '../src/schema';
-import { K, configured, kvReadJson, notConfigured } from '../server/kv';
-import { json, route } from '../server/rest';
+import { BlockStateSchema } from '../src/schema.ts';
+import { K, configured, kvReadJson, notConfigured } from '../server/kv.ts';
+import { json, route } from '../server/rest.ts';
 
 type PresetEntry = { name: string; state: unknown } | { name: string; error: string };
 
@@ -27,8 +27,4 @@ export async function GET(): Promise<Response> {
         );
         return json(200, { files });
     });
-}
-
-export default async function handler(): Promise<Response> {
-    return GET();
 }

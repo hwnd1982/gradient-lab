@@ -5,15 +5,15 @@ import {
     kvReadJson,
     kvWriteJson,
     notConfigured,
-} from '../../server/kv';
+} from '../../server/kv.ts';
 import {
     json,
     parseStateBody,
     readJsonBody,
     requireMutationAuth,
     route,
-} from '../../server/rest';
-import { sanitizeName } from '../../shared/targetKeys';
+} from '../../server/rest.ts';
+import { sanitizeName } from '../../shared/targetKeys.ts';
 
 /** Имя пресета из пути /api/presets/<name> (сегмент после /presets/). */
 function presetNameFromUrl(req: Request): string {
@@ -88,11 +88,4 @@ export async function DELETE(req: Request): Promise<Response> {
         }
         return json(200, { ok: true, name });
     });
-}
-
-export default async function handler(req: Request): Promise<Response> {
-    if (req.method === 'GET') return GET(req);
-    if (req.method === 'PUT') return PUT(req);
-    if (req.method === 'DELETE') return DELETE(req);
-    return json(405, { error: `метод ${req.method} не поддерживается` });
 }

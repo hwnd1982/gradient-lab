@@ -1,5 +1,5 @@
-import type { BlockState, SweepPoint, SweepReq } from '../src/schema';
-import { HttpError, json } from './rest';
+import type { BlockState, SweepPoint, SweepReq } from '../src/schema.ts';
+import { HttpError, json } from './rest.ts';
 
 /**
  * Прод-стор Agent API: Upstash Redis через REST — чистый fetch, без пакетов.

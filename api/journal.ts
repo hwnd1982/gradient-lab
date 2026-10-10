@@ -70,3 +70,10 @@ export async function DELETE(req: Request): Promise<Response> {
         return json(200, { ok: true, cleared: entries.length });
     });
 }
+
+export default async function handler(req: Request): Promise<Response> {
+    if (req.method === 'GET') return GET();
+    if (req.method === 'POST') return POST(req);
+    if (req.method === 'DELETE') return DELETE(req);
+    return json(405, { error: `метод ${req.method} не поддерживается` });
+}

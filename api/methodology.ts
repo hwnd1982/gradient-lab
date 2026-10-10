@@ -11,3 +11,8 @@ import { json, route } from '../server/rest';
 export async function GET(): Promise<Response> {
     return route(async () => json(200, METHODOLOGY));
 }
+
+/** Vercel Node-функции ждут default export; именованные GET/POST — конвенция Edge. */
+export default async function handler(): Promise<Response> {
+    return GET();
+}

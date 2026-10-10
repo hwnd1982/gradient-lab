@@ -14,3 +14,7 @@ export async function GET(): Promise<Response> {
         });
     });
 }
+
+export default async function handler(): Promise<Response> {
+    return GET();
+}

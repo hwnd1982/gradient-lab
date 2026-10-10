@@ -28,3 +28,7 @@ export async function GET(): Promise<Response> {
         return json(200, { files });
     });
 }
+
+export default async function handler(): Promise<Response> {
+    return GET();
+}

@@ -96,3 +96,9 @@ export async function POST(req: Request): Promise<Response> {
         return json(200, { ok: true, id: data.id });
     });
 }
+
+export default async function handler(req: Request): Promise<Response> {
+    if (req.method === 'GET') return GET(req);
+    if (req.method === 'POST') return POST(req);
+    return json(405, { error: `метод ${req.method} не поддерживается` });
+}

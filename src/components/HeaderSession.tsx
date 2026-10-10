@@ -133,6 +133,23 @@ export function HeaderSession({
                     >
                         + Создать сессию
                     </button>
+                    <button
+                        type="button"
+                        className="cursor-pointer rounded-md border border-lab-border bg-lab-panel px-2 py-1.5 text-left text-xs text-lab-muted hover:border-lab-accent hover:text-lab-text"
+                        onClick={async () => {
+                            try {
+                                await navigator.clipboard.writeText(
+                                    `${window.location.origin}/?join=${session}`
+                                );
+                                flashCopyNote('Ссылка сессии скопирована ✓ (?join=)');
+                            } catch {
+                                flashCopyNote('Не удалось скопировать ссылку');
+                            }
+                        }}
+                        title="Ссылку ?join=<id> можно открыть в любом браузере — вкладка войдёт в эту сессию"
+                    >
+                        Копировать ссылку (?join=)
+                    </button>
                     {error !== '' && <span className="text-[10px] text-red-300">{error}</span>}
                     <div className="flex max-h-40 flex-col gap-0.5 overflow-y-auto">
                         {sessions === null ? (

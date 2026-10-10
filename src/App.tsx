@@ -143,15 +143,23 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                 lastKnownVersion = version;
                 const prevState = useLabStore.getState().state;
                 replace(parsed.data, { undoable: false });
-                // индикация агентской активности: что именно поменялось
+                // индикация агентской активности: пачка PUT-ов агрегируется —
+                // тост показывается через 1с затишья и гаснет через 2.5с,
+                // иначе при активном агенте он «висит» постоянно
                 const paths: string[] = [];
                 diffPaths(prevState, parsed.data, '', 0, paths);
                 if (paths.length > 0) {
-                    const head = paths.slice(0, 3).join(', ');
-                    const more = paths.length > 3 ? ` +${paths.length - 3}` : '';
-                    setAgentNote(`Агент обновил: ${head}${more}`);
-                    window.clearTimeout(noteTimer);
-                    noteTimer = window.setTimeout(() => setAgentNote(null), 3500);
+                    burstPaths = [...new Set([...burstPaths, ...paths])].slice(-8);
+                    window.clearTimeout(showTimer);
+                    window.clearTimeout(hideTimer);
+                    showTimer = window.setTimeout(() => {
+                        const uniq = [...new Set(burstPaths)];
+                        const head = uniq.slice(0, 3).join(', ');
+                        const more = uniq.length > 3 ? ` +${uniq.length - 3}` : '';
+                        setAgentNote(`Агент обновил: ${head}${more}`);
+                        burstPaths = [];
+                        hideTimer = window.setTimeout(() => setAgentNote(null), 2500);
+                    }, 1000);
                 }
             };
 
@@ -258,7 +266,9 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             }, 300);
         });
 
-        let noteTimer: number | undefined;
+        let burstPaths: string[] = [];
+        let showTimer: number | undefined;
+        let hideTimer: number | undefined;
         let es: EventSource | null = null;
         // стейт из share-ссылки уже применён — первое SSE-событие после
         // подключения (initial-кэш сервера) не должно его затирать;
@@ -347,7 +357,8 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             cancelled = true;
             unsubscribe();
             window.clearTimeout(timer);
-            window.clearTimeout(noteTimer);
+            window.clearTimeout(showTimer);
+            window.clearTimeout(hideTimer);
             es?.close();
         };
     }, [replace, setDevApiAvailable, setAnalysisTarget, hashLoadedRef, session]);

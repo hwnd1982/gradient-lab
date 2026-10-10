@@ -4,8 +4,8 @@ import type { SessionInfo } from '../lib/agentTransport';
 import { SESSION_ID_RE } from '../lib/session';
 
 /**
- * Бриф для агента по текущей сессии (динамический): origin + id + минимальный
- * цикл. Собирается в момент копирования — сессия/домен всегда актуальны.
+ * Бриф для агента по сессии (динамический): origin + id + минимальный цикл.
+ * Собирается в момент копирования — сессия/домен всегда актуальны.
  */
 function agentBrief(sessionId: string): string {
     return [
@@ -19,10 +19,12 @@ function agentBrief(sessionId: string): string {
  * Селектор сессии в хедере (только прод — dev однопользовательский, всегда
  * 'default', селектор не монтируется): компактный «Сессия: <id>» → поповер с
  * полем id («Открыть/создать» — слот на сервере создаётся лениво), списком
- * живых сессий GET /api/sessions (клик — открыть, текущая подсвечена) и
- * блоком «Инструкция агенту» — копирование брифа текущей сессии в буфер.
- * Смена сессии — колбэк в App (sessionStorage + перезапуск синк/поллинга);
- * вид (зум/пан) не трогаем.
+ * живых сессий GET /api/sessions (клик — открыть, текущая подсвечена; default
+ * помечена янтарным «общая доска») и блоком «Инструкция агенту» — ТОЛЬКО в
+ * своей сессии (в default настроек для агента нет: это локальная работа в
+ * окне, вместо блока — строка-подсказка). Копирование — через
+ * navigator.clipboard с фидбеком; смена сессии — колбэк в App (sessionStorage
+ * + перезапуск синк/поллинга), вид (зум/пан) не трогаем.
  */
 export function HeaderSession({
     session,
@@ -35,7 +37,8 @@ export function HeaderSession({
     const [draft, setDraft] = useState('');
     const [error, setError] = useState('');
     const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
-    const [copied, setCopied] = useState(false);
+    // фидбек копирования брифа ('' — скрыт): обычный и «создать свою»
+    const [copyNote, setCopyNote] = useState('');
     const copyTimer = useRef<number | null>(null);
     const boxRef = useRef<HTMLDivElement | null>(null);
 
@@ -81,19 +84,21 @@ export function HeaderSession({
         if (trimmed !== session) onSwitch(trimmed);
     };
 
+    const flashCopyNote = (note: string): void => {
+        setCopyNote(note);
+        if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+        copyTimer.current = window.setTimeout(() => setCopyNote(''), 3500);
+    };
+
     const copyBrief = async (): Promise<void> => {
-        let ok = false;
         try {
             await navigator.clipboard.writeText(agentBrief(session));
-            ok = true;
+            flashCopyNote('Скопировано ✓');
         } catch {
-            // clipboard недоступен (нет разрешения/не https) — текст остаётся
-            // в блоке, выделяется вручную
-            ok = false;
+            // clipboard недоступен (нет разрешения/не https) — бриф виден в
+            // блоке ниже, выделяется вручную
+            flashCopyNote('Не удалось скопировать — выдели текст в блоке вручную');
         }
-        setCopied(ok);
-        if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-        copyTimer.current = window.setTimeout(() => setCopied(false), 2500);
     };
 
     return (
@@ -162,30 +167,62 @@ export function HeaderSession({
                                     }`}
                                 >
                                     <span className="min-w-0 truncate font-mono">{s.id}</span>
-                                    <span className="shrink-0 text-[10px] text-lab-muted">
-                                        {s.id === session ? 'текущая' : s.name}
-                                    </span>
+                                    {s.id === 'default' ? (
+                                        // default — общая доска: помечаем янтарным, чтобы
+                                        // не путали со своей сессией
+                                        <span
+                                            className="shrink-0 text-[10px] text-amber-300"
+                                            title="Все без своей сессии — агенты и вкладки — пишут в одну доску"
+                                        >
+                                            {s.id === session
+                                                ? 'текущая · общая доска'
+                                                : 'общая доска'}
+                                        </span>
+                                    ) : (
+                                        <span className="shrink-0 text-[10px] text-lab-muted">
+                                            {s.id === session ? 'текущая' : s.name}
+                                        </span>
+                                    )}
                                 </button>
                             ))
                         )}
                     </div>
                     <div className="flex flex-col gap-1 border-t border-lab-border pt-2">
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="text-[10px] text-lab-muted">Инструкция агенту</span>
-                            <button
-                                type="button"
-                                onClick={() => void copyBrief()}
-                                className="cursor-pointer rounded border border-lab-border bg-lab-panel px-2 py-0.5 text-[10px] hover:border-lab-accent"
-                            >
-                                {copied ? 'Скопировано ✓' : 'Копировать'}
-                            </button>
-                        </div>
-                        <pre className="max-h-28 overflow-y-auto rounded border border-lab-border bg-lab-panel px-2 py-1.5 font-mono text-[9px] leading-snug whitespace-pre-wrap text-lab-muted">
-                            {agentBrief(session)}
-                        </pre>
-                        <span className="text-[10px] text-lab-muted">
-                            Полный контракт — /api/schema и API.md в репо
-                        </span>
+                        {session === 'default' ? (
+                            // настроек для агента в default нет — это локальная работа в
+                            // окне; инструкция появляется после создания своей сессии
+                            <span className="text-[10px] text-lab-muted">
+                                Инструкция агенту появится после создания своей сессии
+                            </span>
+                        ) : (
+                            <>
+                                <span className="text-[10px] text-lab-muted">
+                                    Инструкция агенту
+                                </span>
+                                <div className="flex items-center justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={() => void copyBrief()}
+                                        className="cursor-pointer rounded border border-lab-border bg-lab-panel px-2 py-0.5 text-[10px] hover:border-lab-accent"
+                                    >
+                                        Копировать
+                                    </button>
+                                </div>
+                                {copyNote !== '' && (
+                                    <span className="text-[10px] text-lab-muted">{copyNote}</span>
+                                )}
+                                <pre className="max-h-28 overflow-y-auto rounded border border-lab-border bg-lab-panel px-2 py-1.5 font-mono text-[9px] leading-snug whitespace-pre-wrap text-lab-muted">
+                                    {agentBrief(session)}
+                                </pre>
+                                <span className="text-[10px] text-lab-muted">
+                                    Сессии изолируют доски стейта: свой id — своя доска;
+                                    ?join=&lt;id&gt; — зайти в чужую
+                                </span>
+                                <span className="text-[10px] text-lab-muted">
+                                    Полный контракт — /api/schema и API.md в репо
+                                </span>
+                            </>
+                        )}
                     </div>
                 </div>
             )}

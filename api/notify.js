@@ -5663,6 +5663,7 @@ const CompareSpecSchema = object({
 		"off",
 		"opacity",
 		"difference",
+		"gray",
 		"split",
 		"analysis"
 	]),
@@ -5882,8 +5883,21 @@ union([object({
 	id: number(),
 	after: JournalMetricsSchema
 })]);
+/**
+* Поле авто-перебора /api/sweep: путь числового листа стейта (dot-notation).
+* Белый список семейств: `blur.radius` · углы `blur.gradient.angle` /
+* `mask.gradient.angle` · альфа стопов `stops[i].alpha` градиентов
+* `base.gradient` / `mask.gradient` / `blur.gradient` / `blur.underlay.gradient`
+* · прозрачность слоёв `layers[i].opacity`. Индекс — скобками (`stops[2]`,
+* каноническая форма для агента) или точкой (`stops.2` — формат журнала).
+* Путь вне списка / не числовой лист на конце → POST /api/sweep 400;
+* существование пути в текущем стейте проверяет резолвер (src/lib/sweepPath.ts)
+* на исполнении — отсутствующий путь = aborted.
+*/
+const SWEEP_IDX = String.raw`(?:\[\d+\]|\.\d+)`;
+const SWEEP_FIELD_RE = new RegExp(`^(?:blur\\.radius|layers${SWEEP_IDX}\\.opacity|(?:blur\\.gradient|blur\\.underlay\\.gradient|mask\\.gradient|base\\.gradient)\\.stops${SWEEP_IDX}\\.alpha|(?:blur\\.gradient|mask\\.gradient)\\.angle)$`);
 object({
-	field: literal("blur.radius"),
+	field: string().regex(SWEEP_FIELD_RE, { message: "field — путь числового листа: blur.radius | (blur|mask).gradient.angle | (base|mask|blur|blur.underlay).gradient.stops[i].alpha | layers[i].opacity" }),
 	from: number(),
 	to: number(),
 	steps: number().int().min(2).max(12)

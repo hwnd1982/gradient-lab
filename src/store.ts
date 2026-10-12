@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { defaultBlockState } from './schema';
+import { applyNumericPath } from './lib/sweepPath';
 import { readGradient } from './targets';
 import type {
     Analysis,
@@ -173,8 +174,10 @@ interface LabStore {
     setSweepRequest(r: SweepRequest | null): void;
     setSweeping(v: boolean): void;
     /**
-     * Транзиентное применение sweep-значения: без истории (восстановление
-     * исходного значения — тем же экшеном); журнал по флагу sweeping молчит.
+     * Транзиентное применение sweep-значения по пути поля (applyNumericPath:
+     * радиус/угол/альфа стопа/прозрачность слоя — что попросил агент): без
+     * истории (восстановление исходного значения — тем же экшеном); журнал
+     * по флагу sweeping молчит.
      */
     applySweepValue(field: SweepField, value: number): void;
     /** Зеркало журнала: новая запись приложения (start). */
@@ -315,8 +318,7 @@ export const useLabStore = create<LabStore>()((set, get) => {
         applySweepValue: (field, value) => {
             get().update(
                 (d) => {
-                    // единственное sweep-поле v2 — радиус blur (SweepFieldSchema)
-                    if (field === 'blur.radius') d.blur.radius = value;
+                    applyNumericPath(d, field, value);
                 },
                 { transient: true }
             );

@@ -11,7 +11,13 @@
  */
 import { pathToFileURL } from 'node:url';
 
-const FILES = ['./prod-api.test.mjs', './sync-gate.test.mjs', './analysis.test.mjs'];
+const FILES = [
+    './prod-api.test.mjs',
+    './sync-gate.test.mjs',
+    './analysis.test.mjs',
+    './sweep-path.test.mjs',
+    './gray-compare.test.mjs',
+];
 
 let total = 0;
 let failed = 0;

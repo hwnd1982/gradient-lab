@@ -69,6 +69,11 @@ stage.isolated: true). Отдельно посчитай mean-сдвиг base vs
     → полли GET /api/sweep?id=... раз в ~1с до done/aborted → таблица
     value/zoneMatchPercent/maxError. Выход: прирост zoneMatch < 0.5 за шаг →
     радиус ЗАФИКСИРОВАН до конца сессии.
+    Sweep умеет НЕ любой числовой лист, а только белый список семейств:
+    blur.radius · углы blur.gradient.angle / mask.gradient.angle ·
+    альфа стопов base.gradient / mask.gradient / blur.gradient /
+    blur.underlay.gradient (stops[i].alpha — α-динамика стопов, подбор маски
+    без ручных PUT-циклов) · layers[i].opacity; левый путь → 400.
   • F3 МАСКА — форма: предразогрев 0.1@~35% rect → фронт 0.5@~46 → 1@~58 →
     плато. Ручки: позиции стопов + высота пилота. Метрика честна к середине
     маски, финальную форму утверждает юзер.

@@ -121,7 +121,10 @@ export function CompareSection() {
     // кнопки режимов референса — только для режимов с картинкой-оверлеем
     const hasRefOverlay =
         hasImage &&
-        (compare.mode === 'opacity' || compare.mode === 'difference' || compare.mode === 'split');
+        (compare.mode === 'opacity' ||
+            compare.mode === 'difference' ||
+            compare.mode === 'gray' ||
+            compare.mode === 'split');
 
     const modeBtn = (active: boolean): string =>
         `flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 text-xs transition-colors ${
@@ -188,6 +191,11 @@ export function CompareSection() {
                     { value: 'off' as const, label: 'Выкл' },
                     { value: 'opacity' as const, label: 'Прозрачность' },
                     { value: 'difference' as const, label: 'Разница' },
+                    {
+                        value: 'gray' as const,
+                        label: 'Серый',
+                        title: 'совпадение = ровно серый; отклонение темнеет (чёрный ≈ половина диапазона), при большем расхождении снова светлеет; знак Δ не виден',
+                    },
                     { value: 'split' as const, label: 'Разделить' },
                     { value: 'analysis' as const, label: 'Анализ' },
                 ]}

@@ -175,7 +175,7 @@ export type ClipTextSpec = z.infer<typeof ClipTextSpecSchema>;
 /** Сравнение с макетом-референсом (этап perfect pixel). */
 export const CompareSpecSchema = z.object({
     refImage: z.string().nullable(),
-    mode: z.enum(['off', 'opacity', 'difference', 'split', 'analysis']),
+    mode: z.enum(['off', 'opacity', 'difference', 'gray', 'split', 'analysis']),
     opacity: z.number(),
     /** px-смещение референса относительно позиции «на блоке» */
     x: z.number(),
@@ -415,8 +415,28 @@ export const JournalPostSchema = z.union([
 ]);
 export type JournalPost = z.infer<typeof JournalPostSchema>;
 
-/** Поле авто-перебора /api/sweep (v2: пока только радиус blur). */
-export const SweepFieldSchema = z.literal('blur.radius');
+/**
+ * Поле авто-перебора /api/sweep: путь числового листа стейта (dot-notation).
+ * Белый список семейств: `blur.radius` · углы `blur.gradient.angle` /
+ * `mask.gradient.angle` · альфа стопов `stops[i].alpha` градиентов
+ * `base.gradient` / `mask.gradient` / `blur.gradient` / `blur.underlay.gradient`
+ * · прозрачность слоёв `layers[i].opacity`. Индекс — скобками (`stops[2]`,
+ * каноническая форма для агента) или точкой (`stops.2` — формат журнала).
+ * Путь вне списка / не числовой лист на конце → POST /api/sweep 400;
+ * существование пути в текущем стейте проверяет резолвер (src/lib/sweepPath.ts)
+ * на исполнении — отсутствующий путь = aborted.
+ */
+const SWEEP_IDX = String.raw`(?:\[\d+\]|\.\d+)`;
+const SWEEP_GRAD_ALPHA =
+    '(?:blur\\.gradient|blur\\.underlay\\.gradient|mask\\.gradient|base\\.gradient)';
+const SWEEP_GRAD_ANGLE = '(?:blur\\.gradient|mask\\.gradient)';
+export const SWEEP_FIELD_RE = new RegExp(
+    `^(?:blur\\.radius|layers${SWEEP_IDX}\\.opacity|${SWEEP_GRAD_ALPHA}\\.stops${SWEEP_IDX}\\.alpha|${SWEEP_GRAD_ANGLE}\\.angle)$`
+);
+export const SweepFieldSchema = z.string().regex(SWEEP_FIELD_RE, {
+    message:
+        'field — путь числового листа: blur.radius | (blur|mask).gradient.angle | (base|mask|blur|blur.underlay).gradient.stops[i].alpha | layers[i].opacity',
+});
 export type SweepField = z.infer<typeof SweepFieldSchema>;
 
 /** Тело POST /api/sweep: заявка агента на авто-перебор значения одной командой. */

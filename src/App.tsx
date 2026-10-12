@@ -11,6 +11,7 @@ import { computeAnalysis } from './lib/analysis';
 import { pollDelayMs } from './lib/backoff';
 import { computeHint } from './lib/hint';
 import { getCanvas, getImage } from './lib/imageCache';
+import { resolveNumericPath } from './lib/sweepPath';
 import { currentSession, setSession } from './lib/session';
 import { shouldSendSync } from './lib/syncGate';
 import { decodeState, encodeState } from './lib/shareUrl';
@@ -635,10 +636,16 @@ function useAnalysisSync() {
                     return;
                 }
                 // «движение к точке» (методика v2): подсказка перехода фазы по
-                // фактам анализа + хвоста журнала — уходит и в UI, и агенту
+                // фактам анализа + хвоста журнала — уходит и в UI, и агенту;
+                // контекст редактора резолвит журнальные α-стопы (префиксы
+                // семейств) в конкретный stops[i].alpha выбранного стопа
                 const withHint: Analysis = {
                     ...data,
-                    hint: computeHint(data, now.journalEntries),
+                    hint: computeHint(data, now.journalEntries, {
+                        state: now.state,
+                        target: now.activeTarget,
+                        selectedStopId: now.selectedStopId,
+                    }),
                 };
                 setAnalysis(withHint, diff);
                 void agentPost('analysis', withHint);
@@ -687,13 +694,19 @@ type SweepWait =
 /**
  * Исполнение заявки авто-перебора (POST /api/sweep → SSE sweep-request в dev /
  * поле sweepRequest полла в прод → стор → этот хук): для каждого значения из
- * linspace(from, to, steps) — транзиентное применение blur.radius (без истории,
- * applySweepValue), ожидание пересчитанного анализа (~600ms debounce + расчёт),
- * снятие {value, zoneMatchPercent, maxError}; в конце исходный радиус
- * восстанавливается и результат уходит POST /api/__sweep. Чужое изменение
+ * linspace(from, to, steps) — транзиентное применение значения поля пути
+ * (applyNumericPath: радиус/угол/альфа стопа/прозрачность слоя; без истории и
+ * записей журнала, applySweepValue), ожидание пересчитанного анализа (~600ms
+ * debounce + расчёт), снятие {value, zoneMatchPercent, maxError}; в конце
+ * исходное значение поля восстанавливается (тем же applyNumericPath) и
+ * результат уходит POST /api/__sweep. Путь существует в текущем стейте —
+ * проверяет resolveNumericPath на старте: отсутствующий (нет градиента,
+ * индекс за диапазоном) → aborted без единой точки. Чужое изменение
  * стейта/таргета (юзер вмешался — сравнение по ссылкам, как в анализе) = abort
- * БЕЗ восстановления (не затираем чужую правку); результат всё равно отдаётся
- * (частичный + причина). Агент поллит GET /api/sweep?id=... Журнал, warnings и
+ * БЕЗ восстановления (не затираем чужую правку); таймаут точки (10 с) —
+ * state гарантированно наш, исходное значение восстанавливается и abort
+ * уходит с причиной. Результат всё равно отдаётся (частичный + причина).
+ * Агент поллит GET /api/sweep?id=... Журнал, warnings и
  * входящие/исходящие синки во время sweep молчат (флаг sweeping, syncGate).
  * Вторая заявка во время активного sweep отклоняется сразу (POST aborted) —
  * агент не зависает в pending.
@@ -743,38 +756,52 @@ function useSweepSync() {
         const run = async (request: SweepRequest): Promise<void> => {
             const { id, req } = request;
             const store = useLabStore.getState();
-            const original = store.state.blur.radius;
+            const original = resolveNumericPath(store.state, req.field);
             const target0 = store.analysisTarget ?? store.activeTarget;
             store.setSweeping(true);
             const results: SweepPoint[] = [];
             let aborted: string | null = null;
             let ours: BlockState | null = null;
             try {
-                for (const value of linspace(req.from, req.to, req.steps)) {
-                    useLabStore.getState().applySweepValue(req.field, value);
-                    ours = useLabStore.getState().state;
-                    const wait = await waitForAnalysis(Date.now(), ours, target0);
-                    if (wait.kind === 'foreign') {
-                        aborted = `state/таргет изменён вне sweep (юзер/агент) на value=${value}; исходный радиус не восстановлен`;
-                        break;
+                if (original === null) {
+                    // формат поля валиден (схема POST), но в текущем стейте пути
+                    // нет — градиент не задан/индекс за диапазоном/не числовой лист
+                    aborted = `поле "${req.field}" не найдено в текущем стейте (или не числовой лист) — проверь путь по GET /api/state`;
+                } else {
+                    for (const value of linspace(req.from, req.to, req.steps)) {
+                        useLabStore.getState().applySweepValue(req.field, value);
+                        ours = useLabStore.getState().state;
+                        const wait = await waitForAnalysis(Date.now(), ours, target0);
+                        if (wait.kind === 'foreign') {
+                            aborted = `state/таргет изменён вне sweep (юзер/агент) на value=${value}; исходное значение не восстановлено`;
+                            break;
+                        }
+                        if (wait.kind === 'timeout') {
+                            // state гарантированно наш (чужой шаг wait-цикл
+                            // разрешает как foreign) и смениться до этого
+                            // синхронного участка не мог — восстанавливаем
+                            // исходное значение, иначе поле останется с
+                            // последним переборным значением транзиентно (Ctrl+Z
+                            // его не вернёт) и уйдёт финальным синком как канон
+                            useLabStore.getState().applySweepValue(req.field, original);
+                            aborted =
+                                'анализ не пересчитался за 10 с (нет референса?); исходное значение восстановлено';
+                            break;
+                        }
+                        results.push({
+                            value: Math.round(value * 10) / 10,
+                            zoneMatchPercent: wait.analysis.zoneMatchPercent,
+                            maxError: wait.analysis.maxError,
+                        });
                     }
-                    if (wait.kind === 'timeout') {
-                        aborted = 'анализ не пересчитался за 10 с (нет референса?)';
-                        break;
-                    }
-                    results.push({
-                        value: Math.round(value * 10) / 10,
-                        zoneMatchPercent: wait.analysis.zoneMatchPercent,
-                        maxError: wait.analysis.maxError,
-                    });
-                }
-                if (aborted === null && ours !== null) {
-                    // окно между последним анализом и восстановлением тоже проверяем
-                    if (useLabStore.getState().state !== ours) {
-                        aborted =
-                            'state изменён вне sweep после последней точки; исходный радиус не восстановлен';
-                    } else {
-                        useLabStore.getState().applySweepValue(req.field, original);
+                    if (aborted === null && ours !== null) {
+                        // окно между последним анализом и восстановлением тоже проверяем
+                        if (useLabStore.getState().state !== ours) {
+                            aborted =
+                                'state изменён вне sweep после последней точки; исходное значение не восстановлено';
+                        } else {
+                            useLabStore.getState().applySweepValue(req.field, original);
+                        }
                     }
                 }
             } finally {

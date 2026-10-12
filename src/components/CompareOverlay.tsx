@@ -14,9 +14,11 @@ interface CompareOverlayProps {
 const POPUP_WIDTH = 196;
 
 /**
- * Референс-оверлей поверх блока: режимы opacity / difference / split (split —
- * вертикальный или горизонтальный по compare.splitDir), режим analysis —
- * heat-карта расхождений; A/B по удержанию `\`, drag-референс и пипетка.
+ * Референс-оверлей поверх блока: режимы opacity / difference / gray
+ * (PerfectPixel: ref + плашка #808080, оба difference — совпадение = ровно
+ * серый) / split (split — вертикальный или горизонтальный по
+ * compare.splitDir), режим analysis — heat-карта расхождений; A/B по
+ * удержанию `\`, drag-референс и пипетка.
  */
 export function CompareOverlay({ stageRef }: CompareOverlayProps) {
     const state = useLabStore((s) => s.state);
@@ -225,14 +227,23 @@ export function CompareOverlay({ stageRef }: CompareOverlayProps) {
         cursor: compareUI.dragRef ? 'move' : 'crosshair',
         touchAction: 'none',
         opacity: compare.mode === 'opacity' ? compare.opacity : undefined,
-        mixBlendMode: compare.mode === 'difference' ? 'difference' : undefined,
+        mixBlendMode:
+            compare.mode === 'difference' || compare.mode === 'gray' ? 'difference' : undefined,
         clipPath: splitClip,
     };
 
     return (
         <>
             {compareUI.dragRef && (
-                <div className="absolute inset-0 z-[5]" onPointerDown={onCatcherPointerDown} />
+                // catcher строго ПОД оверлей-слоями (z-auto + DOM-порядок: слои
+                // режимов рендерятся позже и стоят выше): клик по референсу
+                // достаётся слою (drag), клик мимо — catcher-у (выключить режим).
+                // Положительный z (было z-[5]) хит-тестился выше z-auto-слоёв
+                // независимо от DOM-порядка и перехватывал клики по самому
+                // референсу — drag был мёртв, режим гас первым же кликом.
+                // Пипетка не конфликтует: dragRef и eyedropper взаимоисключающие
+                // (store.setCompareUI), catcher существует только при dragRef
+                <div className="absolute inset-0" onPointerDown={onCatcherPointerDown} />
             )}
             {compare.mode === 'analysis' ? (
                 analysisDiff !== null && (
@@ -247,6 +258,35 @@ export function CompareOverlay({ stageRef }: CompareOverlayProps) {
                         }}
                     />
                 )
+            ) : compare.mode === 'gray' ? (
+                <>
+                    {/* Серый (PerfectPixel): ref и плашка #808080 — два СИБЛИНГА
+                        с difference каждый: у стека один transform (изоляция
+                        blending потомков), поэтому blend вешаем на сами слои —
+                        ref смешивается с блоком, плашка с уже смешанным ref.
+                        Совпавшие пиксели = ровно #808080; клип радиусом блока
+                        (borderRadius + overflow в overlayStyle) — на обоих. */}
+                    <div
+                        style={overlayStyle}
+                        onPointerDown={
+                            compareUI.eyedropper ? onPickPointerDown : onOverlayPointerDown
+                        }
+                    >
+                        <img
+                            src={compare.refImage}
+                            alt=""
+                            draggable={false}
+                            className="h-full w-full select-none"
+                            style={{ objectFit: 'fill' }}
+                        />
+                    </div>
+                    <div
+                        style={{ ...overlayStyle, background: '#808080' }}
+                        onPointerDown={
+                            compareUI.eyedropper ? onPickPointerDown : onOverlayPointerDown
+                        }
+                    />
+                </>
             ) : (
                 <div
                     style={overlayStyle}

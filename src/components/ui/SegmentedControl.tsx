@@ -1,6 +1,6 @@
 interface SegmentedControlProps<T extends string> {
     value: T;
-    options: { value: T; label: string }[];
+    options: { value: T; label: string; title?: string }[];
     onChange: (value: T) => void;
 }
 
@@ -20,6 +20,7 @@ export function SegmentedControl<T extends string>({
                 <button
                     key={opt.value}
                     type="button"
+                    title={opt.title}
                     className={`flex-none cursor-pointer rounded px-2 py-1 text-xs whitespace-nowrap transition-colors ${
                         value === opt.value
                             ? 'bg-lab-accent text-white'

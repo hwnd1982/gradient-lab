@@ -1,8 +1,9 @@
 /**
  * Юнит-тесты чистой логики приложения: гейт синка shouldSendSync (какие тики
  * подписки уходят в /api/sync — транзиентные значения sweep не уходят),
- * computeHint (5 правил, включая строгое плато радиуса) и зеркало журнала
- * стора (clearJournal). Импорт TS — jiti (см. tests/run.mjs).
+ * computeHint (6 правил, включая строгое плато радиуса и резолв журнальных
+ * α-стопов в конкретный sweep-путь) и зеркало журнала стора (clearJournal).
+ * Импорт TS — jiti (см. tests/run.mjs).
  */
 import { createJiti } from 'jiti';
 
@@ -51,9 +52,9 @@ check(
     shouldSendSync(snap(stateA, false), snap(stateA, false)) === false
 );
 
-// ── computeHint: 5 правил ──
+// ── computeHint: 6 правил ──
 const { computeHint } = await jiti.import(`${ROOT}src/lib/hint.ts`);
-const { AnalysisSchema, uid } = await jiti.import(`${ROOT}src/schema.ts`);
+const { AnalysisSchema, defaultBlockState, uid } = await jiti.import(`${ROOT}src/schema.ts`);
 
 function mkAnalysis(patch) {
     const base = {
@@ -102,11 +103,129 @@ check(
     ]).startsWith('Радиус на плато (F2 exit)')
 );
 check(
-    'hint 1н: дельта ≥0.5 — не плато',
+    'hint 1н: дельта ≥0.5 — не плато, параметр ещё движется → sweep',
     computeHint(aBlur, [
         entry(['blur.radius'], 95.0, 97.0),
         entry(['blur.radius'], 97.2, 97.3),
         entry(['blur.radius'], 97.3, 97.1),
+    ]) ===
+        'Параметр blur.radius ещё движется — прогони динамику: POST /api/sweep {field:"blur.radius"}'
+);
+check(
+    'hint sweep-плато: один числовой лист (угол маски) с живыми дельтами → sweep',
+    computeHint(
+        mkAnalysis({
+            verdict:
+                'остатки — приблизительная классификация (профиль по колонкам): сверяйтесь со ступенями и heat-картой (топ-10: кромки 1, blur 1, уровень 1, приблизительно 7)',
+            residuals: [{ pos: 30, err: 22, kind: 'approx' }],
+        }),
+        [
+            entry(['mask.gradient.angle'], 90.0, 94.0),
+            entry(['mask.gradient.angle'], 94.0, 95.1),
+            entry(['mask.gradient.angle'], 95.1, 95.2),
+        ]
+    ) ===
+        'Параметр mask.gradient.angle ещё движется — прогони динамику: POST /api/sweep {field:"mask.gradient.angle"}'
+);
+check(
+    'hint sweep-плато: дельты <0.5 у не-радиусного листа — sweep не предлагается',
+    computeHint(
+        mkAnalysis({
+            verdict:
+                'остатки — приблизительная классификация (профиль по колонкам): сверяйтесь со ступенями и heat-картой (топ-10: кромки 1, blur 1, уровень 1, приблизительно 7)',
+            residuals: [{ pos: 30, err: 22, kind: 'approx' }],
+        }),
+        [
+            entry(['mask.gradient.angle'], 94.0, 94.2),
+            entry(['mask.gradient.angle'], 94.2, 94.1),
+            entry(['mask.gradient.angle'], 94.1, 94.3),
+        ]
+    ) === 'Продолжай фазу; см. /api/methodology'
+);
+
+// ── computeHint: журнальные α-стопы — diffPaths режет пути тремя сегментами,
+// правки стопов приходят префиксом семейства, а не полным sweep-путем; ctx
+// редактора резолвит конкретный stops[i].alpha выбранного стопа ──
+const stopState = defaultBlockState();
+const stopCtx = {
+    state: stopState,
+    target: { kind: 'mask' },
+    selectedStopId: stopState.mask.gradient.stops[1].id,
+};
+check(
+    'hint 2с: журнал mask.gradient.stops + выбранный стоп → конкретный sweep-путь',
+    computeHint(
+        aBlur,
+        [
+            entry(['mask.gradient.stops'], 90.0, 94.0),
+            entry(['mask.gradient.stops'], 94.0, 95.1),
+            entry(['mask.gradient.stops'], 95.1, 95.2),
+        ],
+        stopCtx
+    ) ===
+        'Параметр mask.gradient.stops[1].alpha ещё движется — прогони динамику: POST /api/sweep {field:"mask.gradient.stops[1].alpha"}'
+);
+const underlayState = defaultBlockState();
+underlayState.blur.underlay.gradient = {
+    type: 'linear',
+    angle: 180,
+    repeating: false,
+    stops: [
+        { id: uid(), pos: 0, color: '#101010', alpha: 0.05 },
+        { id: uid(), pos: 100, color: '#101010', alpha: 0.55 },
+    ],
+};
+check(
+    'hint 2с: blur.underlay.gradient (журнальная форма underlay) → stops[1].alpha',
+    computeHint(
+        aBlur,
+        [
+            entry(['blur.underlay.gradient'], 90.0, 94.0),
+            entry(['blur.underlay.gradient'], 94.0, 95.1),
+            entry(['blur.underlay.gradient'], 95.1, 95.2),
+        ],
+        {
+            state: underlayState,
+            target: { kind: 'underlay' },
+            selectedStopId: underlayState.blur.underlay.gradient.stops[1].id,
+        }
+    ) ===
+        'Параметр blur.underlay.gradient.stops[1].alpha ещё движется — прогони динамику: POST /api/sweep {field:"blur.underlay.gradient.stops[1].alpha"}'
+);
+check(
+    'hint 2сн: стоп не выбран — префикс не резолвится, правило молчит',
+    computeHint(
+        aBlur,
+        [
+            entry(['mask.gradient.stops'], 90.0, 94.0),
+            entry(['mask.gradient.stops'], 94.0, 95.1),
+            entry(['mask.gradient.stops'], 95.1, 95.2),
+        ],
+        { state: stopState, target: { kind: 'mask' }, selectedStopId: null }
+    ) === 'Крути blur.radius и форму blur.mask'
+);
+check(
+    'hint 2сн: активный таргет другого семейства — префикс не резолвится',
+    computeHint(
+        aBlur,
+        [
+            entry(['mask.gradient.stops'], 90.0, 94.0),
+            entry(['mask.gradient.stops'], 94.0, 95.1),
+            entry(['mask.gradient.stops'], 95.1, 95.2),
+        ],
+        {
+            state: stopState,
+            target: { kind: 'blurBg' },
+            selectedStopId: stopState.mask.gradient.stops[1].id,
+        }
+    ) === 'Крути blur.radius и форму blur.mask'
+);
+check(
+    'hint 2н: правки разных полей — правила журнала молчат',
+    computeHint(aBlur, [
+        entry(['mask.gradient.angle'], 90.0, 94.0),
+        entry(['mask.gradient.angle'], 94.0, 95.1),
+        entry(['layers.0.opacity'], 95.1, 95.2),
     ]) === 'Крути blur.radius и форму blur.mask'
 );
 check(
@@ -126,7 +245,7 @@ check(
     ]) === 'Крути blur.radius и форму blur.mask'
 );
 check(
-    'hint 2: кромки → F1',
+    'hint sweep-плато: кромки → F1',
     computeHint(
         mkAnalysis({
             verdict:
@@ -137,7 +256,7 @@ check(
     ) === 'Остатки кромочные — альфа не поможет; проверь blur.rect/кадры (F1) или стоп'
 );
 check(
-    'hint 3: уровень → suggestedStops к <target>',
+    'hint 3 кромки: уровень → suggestedStops к <target>',
     computeHint(
         mkAnalysis({
             verdict:
@@ -152,9 +271,9 @@ check(
     'hint 3н: «уровень 2» в статистике blur-вердикта не триггерит',
     computeHint(aBlur, []) === 'Крути blur.radius и форму blur.mask'
 );
-check('hint 4: все kind=blur', computeHint(aBlur, []) === 'Крути blur.radius и форму blur.mask');
+check('hint 4 уровень: все kind=blur', computeHint(aBlur, []) === 'Крути blur.radius и форму blur.mask');
 check(
-    'hint 5: дефолт → /api/methodology',
+    'hint 5 все-blur: дефолт → /api/methodology',
     computeHint(
         mkAnalysis({
             verdict:

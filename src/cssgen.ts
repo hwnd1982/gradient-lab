@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 import { fmtNum, hexToRgb, rgbToHex, rgbaString } from './lib/color';
 import { isFullRect } from './lib/axis';
 import { uid } from './schema';
-import type { BlockState, Gradient, Stop } from './types';
+import type { BlockState, BlurLayer, Gradient, Stop } from './types';
 
 export interface BaseImageHint {
     src: string;
@@ -13,7 +13,8 @@ export interface BaseImageHint {
 
 export interface PreviewResult {
     block: CSSProperties;
-    blur: CSSProperties | null;
+    /** слои backdrop-blur в DOM-порядке: слой 0 ниже, слой 1 поверх */
+    blur: CSSProperties[];
     /** подложка затемнения под blur (base → layers → underlay → blur) */
     underlay: CSSProperties | null;
     layers: CSSProperties[];
@@ -173,8 +174,16 @@ function cssFit(fit: 'cover' | 'contain' | 'fill'): string {
 }
 
 /**
- * Стили превью: блок, градиентные слои, blur-слой и картинка базы.
- * Порядок отрисовки (BlockBox) как в экспорте: base → слои → blur.
+ * Видимые слои backdrop-blur (превью/экспорт едины): пусто, когда blur
+ * выключен; невидимые слои (visible: false) не рендерятся.
+ */
+export function visibleBlurLayers(state: BlockState): BlurLayer[] {
+    return state.blur.enabled ? state.blur.layers.filter((l) => l.visible) : [];
+}
+
+/**
+ * Стили превью: блок, градиентные слои, blur-слои и картинка базы.
+ * Порядок отрисовки (BlockBox) как в экспорте: base → слои → blur-слои.
  * Слои возвращаются для всех элементов массива state.layers —
  * невидимые (visible: false) вызывающий код пропускает сам.
  */
@@ -203,29 +212,30 @@ export function stateToPreview(state: BlockState): PreviewResult {
         block.maskImage = mask.std;
     }
 
-    // blur — ОДИН элемент ограниченной rect-области: фон + backdrop-filter + маска вместе
-    const blur: CSSProperties | null = state.blur.enabled
-        ? {
-              position: 'absolute',
-              left: `${fmtNum(state.blur.rect.x)}%`,
-              top: `${fmtNum(state.blur.rect.y)}%`,
-              width: `${fmtNum(state.blur.rect.w)}%`,
-              height: `${fmtNum(state.blur.rect.h)}%`,
-              backdropFilter: `blur(${fmtNum(state.blur.radius)}px)`,
-              WebkitBackdropFilter: `blur(${fmtNum(state.blur.radius)}px)`,
-          }
-        : null;
-    if (blur) {
-        blur.background =
-            state.blur.gradient !== null
-                ? gradientToCss(state.blur.gradient)
-                : (state.blur.background ?? undefined);
-        const blurMask = maskToCss(state.blur.mask);
+    // blur — до ДВУХ элементов ограниченных rect-областей в DOM-порядке
+    // (слой 0 ниже, слой 1 поверх — его backdrop блюрит уже заблюренный
+    // слой 0 в зоне пересечения): фон + backdrop-filter + маска вместе
+    const blur: CSSProperties[] = visibleBlurLayers(state).map((layer) => {
+        const el: CSSProperties = {
+            position: 'absolute',
+            left: `${fmtNum(layer.rect.x)}%`,
+            top: `${fmtNum(layer.rect.y)}%`,
+            width: `${fmtNum(layer.rect.w)}%`,
+            height: `${fmtNum(layer.rect.h)}%`,
+            backdropFilter: `blur(${fmtNum(layer.radius)}px)`,
+            WebkitBackdropFilter: `blur(${fmtNum(layer.radius)}px)`,
+        };
+        el.background =
+            layer.gradient !== null
+                ? gradientToCss(layer.gradient)
+                : (layer.background ?? undefined);
+        const blurMask = maskToCss(layer.mask);
         if (blurMask) {
-            blur.WebkitMaskImage = blurMask.webkit;
-            blur.maskImage = blurMask.std;
+            el.WebkitMaskImage = blurMask.webkit;
+            el.maskImage = blurMask.std;
         }
-    }
+        return el;
+    });
 
     // underlay — подложка затемнения ПОД blur-div: своя rect, без маски и блюра
     const underlay: CSSProperties | null = state.blur.underlay.enabled
@@ -407,32 +417,42 @@ export function stateToCssText(state: BlockState, opts: ExportTextOpts = {}): st
         out.push('}');
     }
 
-    if (state.blur.enabled) {
+    const blurLayers = visibleBlurLayers(state);
+    if (blurLayers.length === 1) {
         out.push(
             '',
             '/* blur-слой: ограниченная область + фон + блюр + маска на одном элементе */'
         );
-        out.push('.gradient-block__blur {');
+    } else if (blurLayers.length > 1) {
+        out.push(
+            '',
+            '/* blur-слои: два элемента — пара ::before/::after или два div, на усмотрение вёрстки;',
+            '   __blur (слой 1) раньше в DOM и ниже, __blur-2 (слой 2) поверх: его backdrop блюрит',
+            '   уже заблюренный слой 1 в зоне пересечения, как в браузере */'
+        );
+    }
+    blurLayers.forEach((layer, i) => {
+        out.push(i === 0 ? '.gradient-block__blur {' : '.gradient-block__blur-2 {');
         out.push('    position: absolute;');
         // rect — 4 декларации отдельными строками, как у __blur-underlay выше
-        out.push(`    left: ${fmtNum(state.blur.rect.x)}%;`);
-        out.push(`    top: ${fmtNum(state.blur.rect.y)}%;`);
-        out.push(`    width: ${fmtNum(state.blur.rect.w)}%;`);
-        out.push(`    height: ${fmtNum(state.blur.rect.h)}%;`);
-        out.push(`    -webkit-backdrop-filter: blur(${fmtNum(state.blur.radius)}px);`);
-        out.push(`    backdrop-filter: blur(${fmtNum(state.blur.radius)}px);`);
-        if (state.blur.gradient !== null) {
-            out.push(`    background: ${g(state.blur.gradient)};`);
-        } else if (state.blur.background) {
-            out.push(`    background: ${state.blur.background};`);
+        out.push(`    left: ${fmtNum(layer.rect.x)}%;`);
+        out.push(`    top: ${fmtNum(layer.rect.y)}%;`);
+        out.push(`    width: ${fmtNum(layer.rect.w)}%;`);
+        out.push(`    height: ${fmtNum(layer.rect.h)}%;`);
+        out.push(`    -webkit-backdrop-filter: blur(${fmtNum(layer.radius)}px);`);
+        out.push(`    backdrop-filter: blur(${fmtNum(layer.radius)}px);`);
+        if (layer.gradient !== null) {
+            out.push(`    background: ${g(layer.gradient)};`);
+        } else if (layer.background) {
+            out.push(`    background: ${layer.background};`);
         }
-        const blurMask = maskToCss(state.blur.mask, opts);
+        const blurMask = maskToCss(layer.mask, opts);
         if (blurMask) {
             out.push(`    -webkit-mask-image: ${blurMask.webkit};`);
             out.push(`    mask-image: ${blurMask.std};`);
         }
         out.push('}');
-    }
+    });
 
     if (state.clipText.enabled) {
         out.push('', '/* текст с градиентом */', '.gradient-block__text {');
@@ -466,15 +486,21 @@ export function stateToSassText(state: BlockState, opts: ExportTextOpts = {}): s
     if (state.mask.enabled && !state.anim.enabled) {
         vars.push(`$mask: ${g(state.mask.gradient)}`);
     }
-    if (state.blur.enabled && state.blur.gradient) {
-        vars.push(`$blur-bg: ${g(state.blur.gradient)}`);
-    }
+    const blurLayers = visibleBlurLayers(state);
+    // переменные слоёв blur: слой 0 — $blur-*, слой 1 — $blur-2-*
+    blurLayers.forEach((layer, i) => {
+        if (layer.gradient) {
+            vars.push(`$blur${i === 0 ? '' : '-2'}-bg: ${g(layer.gradient)}`);
+        }
+    });
     if (state.blur.underlay.enabled && state.blur.underlay.gradient) {
         vars.push(`$underlay-bg: ${g(state.blur.underlay.gradient)}`);
     }
-    if (state.blur.enabled && state.blur.mask) {
-        vars.push(`$blur-mask: ${g(state.blur.mask)}`);
-    }
+    blurLayers.forEach((layer, i) => {
+        if (layer.mask) {
+            vars.push(`$blur${i === 0 ? '' : '-2'}-mask: ${g(layer.mask)}`);
+        }
+    });
     if (state.clipText.enabled) {
         vars.push(`$text-gradient: ${g(state.clipText.gradient)}`);
     }
@@ -569,31 +595,42 @@ export function stateToSassText(state: BlockState, opts: ExportTextOpts = {}): s
         }
     }
 
-    if (state.blur.enabled) {
+    if (blurLayers.length === 1) {
         out.push(
             '',
             '    // blur-слой: ограниченная область + фон + блюр + маска на одном элементе',
             '    &__blur'
         );
-        out.push('        position: absolute');
-        // каждая декларация отдельной строкой: в indented Sass запятые
-        // превратили бы это в одну декларацию left с мусорным списком значений
-        out.push(`        left: ${fmtNum(state.blur.rect.x)}%`);
-        out.push(`        top: ${fmtNum(state.blur.rect.y)}%`);
-        out.push(`        width: ${fmtNum(state.blur.rect.w)}%`);
-        out.push(`        height: ${fmtNum(state.blur.rect.h)}%`);
-        out.push(`        -webkit-backdrop-filter: blur(${fmtNum(state.blur.radius)}px)`);
-        out.push(`        backdrop-filter: blur(${fmtNum(state.blur.radius)}px)`);
-        if (state.blur.gradient) {
-            out.push('        background: $blur-bg');
-        } else if (state.blur.background) {
-            out.push(`        background: ${state.blur.background}`);
-        }
-        if (state.blur.mask) {
-            out.push('        -webkit-mask-image: $blur-mask');
-            out.push('        mask-image: $blur-mask');
-        }
+    } else if (blurLayers.length > 1) {
+        out.push(
+            '',
+            '    // blur-слои: два элемента — пара ::before/::after или два div, на усмотрение',
+            '    // вёрстки; &__blur (слой 1) раньше в DOM и ниже, &__blur-2 (слой 2) поверх:',
+            '    // его backdrop блюрит уже заблюренный слой 1 в зоне пересечения',
+            '    &__blur'
+        );
     }
+    blurLayers.forEach((layer, i) => {
+        if (i > 0) out.push('    &__blur-2');
+        out.push('        position: absolute');
+        // каждая декларация rect отдельной строкой: в indented Sass запятые
+        // превратили бы это в одну декларацию left с мусорным списком значений
+        out.push(`        left: ${fmtNum(layer.rect.x)}%`);
+        out.push(`        top: ${fmtNum(layer.rect.y)}%`);
+        out.push(`        width: ${fmtNum(layer.rect.w)}%`);
+        out.push(`        height: ${fmtNum(layer.rect.h)}%`);
+        out.push(`        -webkit-backdrop-filter: blur(${fmtNum(layer.radius)}px)`);
+        out.push(`        backdrop-filter: blur(${fmtNum(layer.radius)}px)`);
+        if (layer.gradient) {
+            out.push(`        background: $blur${i === 0 ? '' : '-2'}-bg`);
+        } else if (layer.background) {
+            out.push(`        background: ${layer.background}`);
+        }
+        if (layer.mask) {
+            out.push(`        -webkit-mask-image: $blur${i === 0 ? '' : '-2'}-mask`);
+            out.push(`        mask-image: $blur${i === 0 ? '' : '-2'}-mask`);
+        }
+    });
 
     if (state.clipText.enabled) {
         out.push('', '    // текст с градиентом', '    &__text');

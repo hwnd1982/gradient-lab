@@ -19,8 +19,9 @@ const MIN_RECT_PCT = 1;
 
 /**
  * rect-область активного таргета для контура/переноса/ресайза на канвасе:
- * layer:N — rect слоя, blurMask/blurBg — blur.rect (при включённом blur),
- * underlay — его rect (при включённом underlay), прочие — null.
+ * layer:N — rect слоя, blurMask/blurBg — rect blur-слоя из таргета (при
+ * включённом blur), underlay — его rect (при включённом underlay), прочие —
+ * null.
  */
 function rectHandleFor(state: BlockState, target: GradientTarget): BlurRect | null {
     switch (target.kind) {
@@ -28,7 +29,7 @@ function rectHandleFor(state: BlockState, target: GradientTarget): BlurRect | nu
             return state.layers[target.index]?.rect ?? null;
         case 'blurMask':
         case 'blurBg':
-            return state.blur.enabled ? state.blur.rect : null;
+            return state.blur.enabled ? (state.blur.layers[target.layer]?.rect ?? null) : null;
         case 'underlay':
             return state.blur.underlay.enabled ? state.blur.underlay.rect : null;
         default:
@@ -91,10 +92,14 @@ export function CanvasHandles({ stageRef }: CanvasHandlesProps) {
         ((activeTarget.kind === 'base' && state.base.kind === 'gradient') ||
             activeTarget.kind === 'layer' ||
             (activeTarget.kind === 'mask' && state.mask.enabled) ||
-            (activeTarget.kind === 'blurMask' && state.blur.enabled && state.blur.mask !== null) ||
+            (activeTarget.kind === 'blurMask' &&
+                state.blur.enabled &&
+                state.blur.layers[activeTarget.layer] !== undefined &&
+                state.blur.layers[activeTarget.layer].mask !== null) ||
             (activeTarget.kind === 'blurBg' &&
                 state.blur.enabled &&
-                state.blur.gradient !== null) ||
+                state.blur.layers[activeTarget.layer] !== undefined &&
+                state.blur.layers[activeTarget.layer].gradient !== null) ||
             (activeTarget.kind === 'underlay' &&
                 state.blur.underlay.enabled &&
                 state.blur.underlay.gradient !== null) ||
@@ -413,7 +418,9 @@ export function CanvasHandles({ stageRef }: CanvasHandlesProps) {
                 ? `Слой ${activeTarget.index + 1}`
                 : activeTarget.kind === 'underlay'
                   ? 'Подложка'
-                  : 'Область blur';
+                  : activeTarget.kind === 'blurMask' || activeTarget.kind === 'blurBg'
+                    ? `Область blur ${activeTarget.layer + 1}`
+                    : 'Область blur';
         const chipW = label.length * 6 + 14;
         // над верхней гранью; если контур прижат к верху стейджа — внутрь контура
         const chipY = rp.y >= 26 ? rp.y - 21 : rp.y + 5;

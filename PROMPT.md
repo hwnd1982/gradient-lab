@@ -1,7 +1,9 @@
 # Мастер-промт для агента — подбор blur-затухания в Gradient Lab
 
-> Скопируй агенту целиком. Версия 3 (2026-10-10) — методика v2 (фазы F0–F6
-> из `GET /api/methodology`), приборы: hint в анализе, `POST /api/sweep`.
+> Скопируй агенту целиком. Версия 4 (2026-10-13) — два blur-слоя
+> (`blur.layers[0..1]`, progressive-blur), предупреждение жёсткой кромки,
+> слоевые sweep-пути. Методика v2 (фазы F0–F6 из `GET /api/methodology`),
+> приборы: hint в анализе, `POST /api/sweep`.
 
 ```text
 Ты подбираешь blur-затухание / градиентную маску в песочнице Gradient Lab
@@ -57,7 +59,8 @@ stage.isolated: true). Отдельно посчитай mean-сдвиг base vs
 
 ШАГ 6 — ЦИКЛ ПОДГОНКИ по фазам F2–F5 (какая фаза — знаешь ты; полная
 процедура — GET /api/methodology):
-  GET /api/analysis?target=<таргет эффекта>   // blurMask | blurBg | underlay | layer:N | blockMask
+  GET /api/analysis?target=<таргет эффекта>   // blurMask | blurBg (слоя 0; + :1 для
+  слоя 1) | underlay | layer:N | blockMask
   Первый ответ может быть 404 {"requested":...} — полли раз в ~1с, пока target
   в ответе не совпадёт с запрошенным (нужна открытая вкладка — SSE).
   Читай: zoneMatchPercent (главная цифра, решения по Δ≥0.5; ±0.3 — шум),
@@ -70,10 +73,11 @@ stage.isolated: true). Отдельно посчитай mean-сдвиг base vs
     value/zoneMatchPercent/maxError. Выход: прирост zoneMatch < 0.5 за шаг →
     радиус ЗАФИКСИРОВАН до конца сессии.
     Sweep умеет НЕ любой числовой лист, а только белый список семейств:
-    blur.radius · углы blur.gradient.angle / mask.gradient.angle ·
-    альфа стопов base.gradient / mask.gradient / blur.gradient /
-    blur.underlay.gradient (stops[i].alpha — α-динамика стопов, подбор маски
-    без ручных PUT-циклов) · layers[i].opacity; левый путь → 400.
+    blur.radius (алиас слоя 0) · blur.layers[i].radius и углы
+    blur.layers[i].gradient.angle / blur.gradient.angle (алиас) /
+    mask.gradient.angle · альфа стопов base.gradient / mask.gradient /
+    blur.gradient (алиас) / blur.layers[i].gradient / blur.underlay.gradient
+    (stops[i].alpha — α-динамика стопов) · layers[i].opacity; левый путь → 400.
   • F3 МАСКА — форма: предразогрев 0.1@~35% rect → фронт 0.5@~46 → 1@~58 →
     плато. Ручки: позиции стопов + высота пилота. Метрика честна к середине
     маски, финальную форму утверждает юзер.
@@ -82,7 +86,9 @@ stage.isolated: true). Отдельно посчитай mean-сдвиг base vs
     revert если упал.
   • F5 ГЕОМЕТРИЧЕСКИЕ ПРИЁМЫ (если plateau < целевого): по одному,
     keep/revert: rect-заход за край (y −20%, h 120%) · двухступенчатая маска ·
-    заливка-вспышка.
+    заливка-вспышка · два blur-слоя: blur.layers[0] (::before, меньший
+    радиус, выше) + blur.layers[1] (::after, больший радиус, ниже) — верхний
+    блюрит уже заблюренный нижний в зоне пересечения.
   Решение по verdict (если hint не сказал переход):
   • «кромки» (kind=edge) — альфа не поможет: правь геометрию (F1) или стоп;
   • «уровень» — применяй suggestedStops (alpha-таргетам: blurMask/blurBg/
@@ -96,17 +102,28 @@ stage.isolated: true). Отдельно посчитай mean-сдвиг base vs
   до done/aborted). Откат — `GET /api/journal` или state-full.json.
 
 ШАГ 7 — РУЧКИ (симптом → чем крутить):
-  blur.rect (x/y/w/h % блока)          = ГДЕ живёт эффект (зафиксирован в F1);
-                                         в F5 допустим заход за край
-  blur.radius (px)                     = сила размытия; коридор 8–14 (1x–2x
+  blur.layers[i] (rect/radius/маска/заливка) = слои backdrop-blur, до двух;
+                                         слой 0 ниже (::before), слой 1 поверх
+                                         (::after, блюрит уже заблюренный
+                                         слой 0); приём: меньший радиус выше,
+                                         больший ниже; таргеты анализа —
+                                         blurMask / blurBg (+ :1 для слоя 1)
+  blur.layers[i].rect (x/y/w/h % блока)  = ГДЕ живёт эффект (зафиксирован в
+                                         F1); в F5 допустим заход за край;
+                                         если rect зажат внутри блока — маска
+                                         обязана растворяться к его кромке
+                                         (α≈0, стопы можно выносить за 0–100%),
+                                         иначе warnings: blur-hard-edge
+  blur.layers[i].radius (px)             = сила размытия; коридор 8–14 (1x–2x
                                          photo-кадры), фиксация по плато (F2);
-                                         коридор — POST /api/sweep
-  blur.gradient                        = заливка blur-слоя: ОБЯЗАТЕЛЬНА при
+                                         коридор — POST /api/sweep (алиас
+                                         blur.radius = слой 0)
+  blur.layers[i].gradient                = заливка слоя: ОБЯЗАТЕЛЬНА при
                                          Z>2 (тающая от фронта, радиальная от
                                          края cx ≈ 100% rect, НЕ линейная
                                          полоса); при Z~0 — не добавлять «по
                                          умолчанию», одна проба (F4)
-  blur.mask                            = ФОРМА растворения blur-слоя: пред-
+  blur.layers[i].mask                    = ФОРМА растворения слоя: пред-
                                          разогрев → фронт → плато (F3).
                                          Середина маски в метрике видна
                                          слабо — финальную форму утверждает

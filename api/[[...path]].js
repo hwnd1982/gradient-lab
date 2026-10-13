@@ -2721,6 +2721,9 @@ function handlePipeResult(left, next, ctx) {
 		issues: left.issues
 	}, ctx);
 }
+const $ZodPreprocess = /*@__PURE__*/ $constructor("$ZodPreprocess", (inst, def) => {
+	$ZodPipe.init(inst, def);
+});
 const $ZodReadonly = /*@__PURE__*/ $constructor("$ZodReadonly", (inst, def) => {
 	$ZodType.init(inst, def);
 	defineLazyInternal(inst, "propValues", (zod) => zod.def.innerType._zod.propValues);
@@ -5705,6 +5708,10 @@ function pipe(in_, out) {
 		out
 	});
 }
+const ZodPreprocess = /*@__PURE__*/ $constructor("ZodPreprocess", (inst, def) => {
+	ZodPipe.init(inst, def);
+	$ZodPreprocess.init(inst, def);
+});
 const ZodReadonly = /*@__PURE__*/ $constructor("ZodReadonly", (inst, def) => {
 	$ZodReadonly.init(inst, def);
 	ZodType.init(inst, def);
@@ -5727,6 +5734,13 @@ function refine(fn, _params = {}) {
 }
 function superRefine(fn, params) {
 	return /* @__PURE__ */ _superRefine(fn, params);
+}
+function preprocess(fn, schema) {
+	return new ZodPreprocess({
+		type: "pipe",
+		in: transform(fn),
+		out: schema
+	});
 }
 //#endregion
 //#region src/schema.ts
@@ -5869,23 +5883,62 @@ const BlurUnderlaySchema = object({
 	/** градиентная заливка underlay */
 	gradient: GradientSchema.nullable().default(null)
 });
-const BlurSpecSchema = object({
-	enabled: boolean(),
+/**
+* Слой backdrop-blur: до ДВУХ на блок (пара ::before/::after или два div).
+* Слой 0 ниже в DOM, слой 1 поверх — его backdrop блюрит уже заблюренный
+* результат слоя 0 в зоне пересечения (как в браузере). .default() на всех
+* необязательных полях — старые стейты без них остаются валидными.
+*/
+const BlurLayerSchema = object({
+	id: string(),
+	visible: boolean().default(true),
 	/** px, backdrop-filter: blur() */
 	radius: number(),
 	/** опциональный цвет подложки rgba(...) — легаси-поле; при заданном gradient игнорируется */
-	background: string().nullable(),
+	background: string().nullable().default(null),
 	/** градиентная заливка того же псевдоэлемента (фон + blur + маска на одном элементе) */
 	gradient: GradientSchema.nullable().default(null),
-	/** маска на blur-слой */
-	mask: GradientSchema.nullable(),
-	/** область blur-слоя внутри блока, % от блока; .default() — старые стейты остаются валидными */
+	/** маска на слой */
+	mask: GradientSchema.nullable().default(null),
+	/** область слоя внутри блока, % от блока */
 	rect: BlurRectSchema.default({
 		x: 0,
 		y: 0,
 		w: 100,
 		h: 100
-	}),
+	})
+});
+/**
+* Плоский blur старого формата (до слоёв): {enabled, radius, background,
+* gradient, mask, rect} — заворачивается в layers[0] всегда, независимо от
+* enabled (при включении тумблера слой уже готов). Старые сессии Upstash,
+* пресеты и share-хэши остаются валидными.
+*/
+const FLAT_BLUR_KEYS = [
+	"radius",
+	"background",
+	"gradient",
+	"mask",
+	"rect"
+];
+const BlurSpecSchema = preprocess((raw) => {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+	const obj = raw;
+	if (obj.layers !== void 0) return obj;
+	if (!FLAT_BLUR_KEYS.some((k) => obj[k] !== void 0)) return obj;
+	const layer = {
+		id: uid(),
+		visible: true
+	};
+	for (const k of FLAT_BLUR_KEYS) if (obj[k] !== void 0) layer[k] = obj[k];
+	return {
+		...obj,
+		layers: [layer]
+	};
+}, object({
+	enabled: boolean(),
+	/** до двух слоёв backdrop-blur; 3+ — ошибка валидации */
+	layers: array(BlurLayerSchema).max(2),
 	/** подложка затемнения под blur; .default() — старые стейты без поля остаются валидными */
 	underlay: BlurUnderlaySchema.default({
 		enabled: false,
@@ -5898,7 +5951,7 @@ const BlurSpecSchema = object({
 		color: null,
 		gradient: null
 	})
-});
+}));
 const ClipTextSpecSchema = object({
 	enabled: boolean(),
 	text: string(),
@@ -6141,20 +6194,26 @@ const JournalPostSchema = union([object({
 })]);
 /**
 * Поле авто-перебора /api/sweep: путь числового листа стейта (dot-notation).
-* Белый список семейств: `blur.radius` · углы `blur.gradient.angle` /
-* `mask.gradient.angle` · альфа стопов `stops[i].alpha` градиентов
-* `base.gradient` / `mask.gradient` / `blur.gradient` / `blur.underlay.gradient`
-* · прозрачность слоёв `layers[i].opacity`. Индекс — скобками (`stops[2]`,
-* каноническая форма для агента) или точкой (`stops.2` — формат журнала).
-* Путь вне списка / не числовой лист на конце → POST /api/sweep 400;
-* существование пути в текущем стейте проверяет резолвер (src/lib/sweepPath.ts)
-* на исполнении — отсутствующий путь = aborted.
+* Белый список семейств: радиусы `blur.radius` (алиас слоя 0) /
+* `blur.layers[i].radius` (i 0..1) · углы `blur.gradient.angle` (алиас слоя
+* 0) / `blur.layers[i].gradient.angle` / `mask.gradient.angle` · альфа стопов
+* `stops[i].alpha` градиентов `base.gradient` / `mask.gradient` /
+* `blur.gradient` (алиас слоя 0) / `blur.layers[i].gradient` /
+* `blur.underlay.gradient` · прозрачность слоёв `layers[i].opacity`.
+* Индекс — скобками (`stops[2]`, каноническая форма для агента) или точкой
+* (`stops.2` — формат журнала). Плоские `blur.X`-пути нормализуются в
+* `blur.layers.0.X` резолвером (src/lib/sweepPath.ts). Путь вне списка /
+* не числовой лист на конце → POST /api/sweep 400; существование пути в
+* текущем стейте проверяет резолвер на исполнении — отсутствующий путь =
+* aborted.
 */
 const SWEEP_IDX = String.raw`(?:\[\d+\]|\.\d+)`;
-const SWEEP_FIELD_RE = new RegExp(`^(?:blur\\.radius|layers${SWEEP_IDX}\\.opacity|(?:blur\\.gradient|blur\\.underlay\\.gradient|mask\\.gradient|base\\.gradient)\\.stops${SWEEP_IDX}\\.alpha|(?:blur\\.gradient|mask\\.gradient)\\.angle)$`);
+/** blur-слой: `blur.layers[i]` (i 0..1, скобки/точка) или плоский алиас слоя 0 (`blur`). */
+const SWEEP_BLUR_LAYER = "(?:blur\\.layers(?:\\[[01]\\]|\\.[01])|blur)";
+const SWEEP_FIELD_RE = new RegExp(`^(?:${SWEEP_BLUR_LAYER}\\.radius|layers${SWEEP_IDX}\\.opacity|${`(?:${SWEEP_BLUR_LAYER}\\.gradient|blur\\.underlay\\.gradient|mask\\.gradient|base\\.gradient)`}\\.stops${SWEEP_IDX}\\.alpha|${`(?:${SWEEP_BLUR_LAYER}\\.gradient|mask\\.gradient)`}\\.angle)$`);
 /** Тело POST /api/sweep: заявка агента на авто-перебор значения одной командой. */
 const SweepReqSchema = object({
-	field: string().regex(SWEEP_FIELD_RE, { message: "field — путь числового листа: blur.radius | (blur|mask).gradient.angle | (base|mask|blur|blur.underlay).gradient.stops[i].alpha | layers[i].opacity" }),
+	field: string().regex(SWEEP_FIELD_RE, { message: "field — путь числового листа: blur.radius | blur.layers[i].radius | (blur|blur.layers[i]|mask).gradient.angle | (base|mask|blur|blur.layers[i]|blur.underlay).gradient.stops[i].alpha | layers[i].opacity" }),
 	from: number(),
 	to: number(),
 	steps: number().int().min(2).max(12)
@@ -6227,8 +6286,14 @@ discriminatedUnion("kind", [
 		index: number()
 	}),
 	object({ kind: literal("mask") }),
-	object({ kind: literal("blurMask") }),
-	object({ kind: literal("blurBg") }),
+	object({
+		kind: literal("blurMask"),
+		layer: number().default(0)
+	}),
+	object({
+		kind: literal("blurBg"),
+		layer: number().default(0)
+	}),
 	object({ kind: literal("underlay") }),
 	object({ kind: literal("clipText") }),
 	object({ kind: literal("animFrom") }),
@@ -6261,12 +6326,16 @@ function defaultLinearGradient(angle = 180, stops) {
 * Валидные ключи ?target= — единый источник: 400-ответ (known) и список в
 * разделе API.md «GET /api/analysis» держать синхронным с этим массивом.
 * 'layer:<index>' — шаблон; канонический ключ — 'layer:N' без ведущих нулей.
+* 'blurMask:<layer>' / 'blurBg:<layer>' — шаблоны blur-слоёв; слой 0
+* каноничен без суффикса ('blurMask' / 'blurBg').
 */
 const KNOWN_TARGET_KEYS = [
 	"base",
 	"blockMask",
 	"blurMask",
 	"blurBg",
+	"blurMask:<layer>",
+	"blurBg:<layer>",
 	"underlay",
 	"clipText",
 	"animFrom",
@@ -6276,13 +6345,19 @@ const KNOWN_TARGET_KEYS = [
 /**
 * Валидный ?target= → канонический ключ (текстом: сервер только валидирует и
 * передаёт, разбор в таргет делает приложение). 'mask' — алиас blockMask,
-* числовой суффикс layer нормализуется (layer:007 → layer:7).
+* числовой суффикс layer нормализуется (layer:007 → layer:7); blur-таргет
+* слоя 0 нормализуется в бессуффиксную форму (blurMask:0 → blurMask).
 */
 function canonicalTargetKey(raw) {
 	if (raw === "mask") return "blockMask";
 	if (KNOWN_TARGET_KEYS.includes(raw)) return raw;
-	const m = raw.match(/^layer:(\d+)$/);
+	let m = raw.match(/^layer:(\d+)$/);
 	if (m !== null) return `layer:${Number(m[1])}`;
+	m = raw.match(/^(blurMask|blurBg):(\d+)$/);
+	if (m !== null) {
+		const n = Number(m[2]);
+		return n === 0 ? m[1] : `${m[1]}:${n}`;
+	}
 	return null;
 }
 /** 'мой пресет!.json' -> 'my-preset-' безопасное имя (латиница, цифры, _ и -). */
@@ -6908,7 +6983,11 @@ const METHODOLOGY = MethodologySchema.parse({
 		{
 			id: "F5",
 			title: "Геометрические приёмы",
-			actions: ["если plateau < целевого: по одному, keep/revert каждая", "rect-заход за край (y −20%, h 120%) · двухступенчатая маска · заливка-вспышка"],
+			actions: [
+				"если plateau < целевого: по одному, keep/revert каждая",
+				"rect-заход за край (y −20%, h 120%) · двухступенчатая маска · заливка-вспышка",
+				"два blur-слоя (blur.layers[0]+[1]): ::before меньшего радиуса выше, ::after большего ниже — верхний блюрит уже заблюренный нижний; жёсткую кромку rect лечи стопом маски в α0 за кромкой"
+			],
 			exit: "каждый приём зафиксирован (keep) или откачен (revert); blur.rect из F1 трогается только здесь"
 		},
 		{
@@ -6958,7 +7037,10 @@ F4 ЗАЛИВКА: если Z>2 — обязательна, форма тающ�
   keep если zoneMatch вырос, revert если упал (в сессии дала финальные 98.7 и худшую
   точку 14→10).
 F5 ГЕОМЕТРИЧЕСКИЕ ПРИЁМЫ (если plateau < целевого): по одному, keep/revert каждая:
-  rect-заход за край (y −20%, h 120%) · двухступенчатая маска · заливка-вспышка.
+  rect-заход за край (y −20%, h 120%) · двухступенчатая маска · заливка-вспышка ·
+  два blur-слоя (blur.layers[0]+[1]: ::before меньшего радиуса выше, ::after
+  большего ниже — верхний блюрит уже заблюренный нижний в зоне пересечения;
+  жёсткая кромка rect лечится стопом маски в α0 ЗА кромкой).
 F6 СТОП: zoneMatch стабилен 2 замера (±0.3 — не прогресс) И verdict без «уровня» И
   остатки только blur (≤3 точек). Отдать baseline юзеру: его руки — финальный
   оптимизатор (2 сессии подряд ручной вариант бил циклический подбор). Перед циклом

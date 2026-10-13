@@ -143,26 +143,61 @@ export const BlurUnderlaySchema = z.object({
 });
 export type BlurUnderlay = z.infer<typeof BlurUnderlaySchema>;
 
-export const BlurSpecSchema = z.object({
-    enabled: z.boolean(),
+/**
+ * Слой backdrop-blur: до ДВУХ на блок (пара ::before/::after или два div).
+ * Слой 0 ниже в DOM, слой 1 поверх — его backdrop блюрит уже заблюренный
+ * результат слоя 0 в зоне пересечения (как в браузере). .default() на всех
+ * необязательных полях — старые стейты без них остаются валидными.
+ */
+export const BlurLayerSchema = z.object({
+    id: z.string(),
+    visible: z.boolean().default(true),
     /** px, backdrop-filter: blur() */
     radius: z.number(),
     /** опциональный цвет подложки rgba(...) — легаси-поле; при заданном gradient игнорируется */
-    background: z.string().nullable(),
+    background: z.string().nullable().default(null),
     /** градиентная заливка того же псевдоэлемента (фон + blur + маска на одном элементе) */
     gradient: GradientSchema.nullable().default(null),
-    /** маска на blur-слой */
-    mask: GradientSchema.nullable(),
-    /** область blur-слоя внутри блока, % от блока; .default() — старые стейты остаются валидными */
+    /** маска на слой */
+    mask: GradientSchema.nullable().default(null),
+    /** область слоя внутри блока, % от блока */
     rect: BlurRectSchema.default({ x: 0, y: 0, w: 100, h: 100 }),
-    /** подложка затемнения под blur; .default() — старые стейты без поля остаются валидными */
-    underlay: BlurUnderlaySchema.default({
-        enabled: false,
-        rect: { x: 0, y: 0, w: 100, h: 100 },
-        color: null,
-        gradient: null,
-    }),
 });
+export type BlurLayer = z.infer<typeof BlurLayerSchema>;
+
+/**
+ * Плоский blur старого формата (до слоёв): {enabled, radius, background,
+ * gradient, mask, rect} — заворачивается в layers[0] всегда, независимо от
+ * enabled (при включении тумблера слой уже готов). Старые сессии Upstash,
+ * пресеты и share-хэши остаются валидными.
+ */
+const FLAT_BLUR_KEYS = ['radius', 'background', 'gradient', 'mask', 'rect'] as const;
+
+export const BlurSpecSchema = z.preprocess(
+    (raw) => {
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+        const obj = raw as Record<string, unknown>;
+        if (obj.layers !== undefined) return obj;
+        if (!FLAT_BLUR_KEYS.some((k) => obj[k] !== undefined)) return obj;
+        const layer: Record<string, unknown> = { id: uid(), visible: true };
+        for (const k of FLAT_BLUR_KEYS) {
+            if (obj[k] !== undefined) layer[k] = obj[k];
+        }
+        return { ...obj, layers: [layer] };
+    },
+    z.object({
+        enabled: z.boolean(),
+        /** до двух слоёв backdrop-blur; 3+ — ошибка валидации */
+        layers: z.array(BlurLayerSchema).max(2),
+        /** подложка затемнения под blur; .default() — старые стейты без поля остаются валидными */
+        underlay: BlurUnderlaySchema.default({
+            enabled: false,
+            rect: { x: 0, y: 0, w: 100, h: 100 },
+            color: null,
+            gradient: null,
+        }),
+    })
+);
 export type BlurSpec = z.infer<typeof BlurSpecSchema>;
 
 export const ClipTextSpecSchema = z.object({
@@ -417,25 +452,30 @@ export type JournalPost = z.infer<typeof JournalPostSchema>;
 
 /**
  * Поле авто-перебора /api/sweep: путь числового листа стейта (dot-notation).
- * Белый список семейств: `blur.radius` · углы `blur.gradient.angle` /
- * `mask.gradient.angle` · альфа стопов `stops[i].alpha` градиентов
- * `base.gradient` / `mask.gradient` / `blur.gradient` / `blur.underlay.gradient`
- * · прозрачность слоёв `layers[i].opacity`. Индекс — скобками (`stops[2]`,
- * каноническая форма для агента) или точкой (`stops.2` — формат журнала).
- * Путь вне списка / не числовой лист на конце → POST /api/sweep 400;
- * существование пути в текущем стейте проверяет резолвер (src/lib/sweepPath.ts)
- * на исполнении — отсутствующий путь = aborted.
+ * Белый список семейств: радиусы `blur.radius` (алиас слоя 0) /
+ * `blur.layers[i].radius` (i 0..1) · углы `blur.gradient.angle` (алиас слоя
+ * 0) / `blur.layers[i].gradient.angle` / `mask.gradient.angle` · альфа стопов
+ * `stops[i].alpha` градиентов `base.gradient` / `mask.gradient` /
+ * `blur.gradient` (алиас слоя 0) / `blur.layers[i].gradient` /
+ * `blur.underlay.gradient` · прозрачность слоёв `layers[i].opacity`.
+ * Индекс — скобками (`stops[2]`, каноническая форма для агента) или точкой
+ * (`stops.2` — формат журнала). Плоские `blur.X`-пути нормализуются в
+ * `blur.layers.0.X` резолвером (src/lib/sweepPath.ts). Путь вне списка /
+ * не числовой лист на конце → POST /api/sweep 400; существование пути в
+ * текущем стейте проверяет резолвер на исполнении — отсутствующий путь =
+ * aborted.
  */
 const SWEEP_IDX = String.raw`(?:\[\d+\]|\.\d+)`;
-const SWEEP_GRAD_ALPHA =
-    '(?:blur\\.gradient|blur\\.underlay\\.gradient|mask\\.gradient|base\\.gradient)';
-const SWEEP_GRAD_ANGLE = '(?:blur\\.gradient|mask\\.gradient)';
+/** blur-слой: `blur.layers[i]` (i 0..1, скобки/точка) или плоский алиас слоя 0 (`blur`). */
+const SWEEP_BLUR_LAYER = '(?:blur\\.layers(?:\\[[01]\\]|\\.[01])|blur)';
+const SWEEP_GRAD_ALPHA = `(?:${SWEEP_BLUR_LAYER}\\.gradient|blur\\.underlay\\.gradient|mask\\.gradient|base\\.gradient)`;
+const SWEEP_GRAD_ANGLE = `(?:${SWEEP_BLUR_LAYER}\\.gradient|mask\\.gradient)`;
 export const SWEEP_FIELD_RE = new RegExp(
-    `^(?:blur\\.radius|layers${SWEEP_IDX}\\.opacity|${SWEEP_GRAD_ALPHA}\\.stops${SWEEP_IDX}\\.alpha|${SWEEP_GRAD_ANGLE}\\.angle)$`
+    `^(?:${SWEEP_BLUR_LAYER}\\.radius|layers${SWEEP_IDX}\\.opacity|${SWEEP_GRAD_ALPHA}\\.stops${SWEEP_IDX}\\.alpha|${SWEEP_GRAD_ANGLE}\\.angle)$`
 );
 export const SweepFieldSchema = z.string().regex(SWEEP_FIELD_RE, {
     message:
-        'field — путь числового листа: blur.radius | (blur|mask).gradient.angle | (base|mask|blur|blur.underlay).gradient.stops[i].alpha | layers[i].opacity',
+        'field — путь числового листа: blur.radius | blur.layers[i].radius | (blur|blur.layers[i]|mask).gradient.angle | (base|mask|blur|blur.layers[i]|blur.underlay).gradient.stops[i].alpha | layers[i].opacity',
 });
 export type SweepField = z.infer<typeof SweepFieldSchema>;
 
@@ -526,8 +566,9 @@ export const GradientTargetSchema = z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('base') }),
     z.object({ kind: z.literal('layer'), index: z.number() }),
     z.object({ kind: z.literal('mask') }),
-    z.object({ kind: z.literal('blurMask') }),
-    z.object({ kind: z.literal('blurBg') }),
+    /** слой 0 — канонический таргет без суффикса (back-compat ключей API) */
+    z.object({ kind: z.literal('blurMask'), layer: z.number().default(0) }),
+    z.object({ kind: z.literal('blurBg'), layer: z.number().default(0) }),
     z.object({ kind: z.literal('underlay') }),
     z.object({ kind: z.literal('clipText') }),
     z.object({ kind: z.literal('animFrom') }),
@@ -561,6 +602,26 @@ export function defaultRadialGradient(stops?: Stop[]): RadialGradient {
     };
 }
 
+/**
+ * Слой blur по умолчанию (создание тумблером при пустых layers; кнопка
+ * «+ слой» копирует существующий слой): радиус 24px, весь блок,
+ * маска-растворение книзу (linear 180° α1@0 → α0@100), без заливки.
+ */
+export function defaultBlurLayer(): BlurLayer {
+    return {
+        id: uid(),
+        visible: true,
+        radius: 24,
+        background: null,
+        gradient: null,
+        mask: defaultLinearGradient(180, [
+            { id: uid(), pos: 0, color: '#000000', alpha: 1 },
+            { id: uid(), pos: 100, color: '#000000', alpha: 0 },
+        ]),
+        rect: { x: 0, y: 0, w: 100, h: 100 },
+    };
+}
+
 export function defaultBlockState(): BlockState {
     return {
         w: 360,
@@ -584,13 +645,10 @@ export function defaultBlockState(): BlockState {
         // чистый холст: ни одного демо-слоя — юзер добавляет слои сам
         layers: [],
         mask: { enabled: false, gradient: defaultLinearGradient() },
+        // чистый холст: слоёв blur нет — создаются тумблером/кнопкой «+ слой»
         blur: {
             enabled: false,
-            radius: 24,
-            background: null,
-            gradient: null,
-            mask: null,
-            rect: { x: 0, y: 0, w: 100, h: 100 },
+            layers: [],
             underlay: {
                 enabled: false,
                 rect: { x: 0, y: 0, w: 100, h: 100 },

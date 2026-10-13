@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import { clipTextFontSize, gradientToCss, stateToPreview } from '../cssgen';
+import { clipTextFontSize, gradientToCss, stateToPreview, visibleBlurLayers } from '../cssgen';
 import { defaultBlockState } from '../schema';
 import { applyPresetFields, mergePresetInto } from '../presets/apply';
 import { BUILTIN_PRESETS } from '../presets/builtin';
@@ -96,7 +96,9 @@ function PresetPreview({ apply }: { apply: Partial<BlockState> }) {
                 {state.layers.map(
                     (l, i) => l.visible && <div key={l.id} style={preview.layers[i]} />
                 )}
-                {preview.blur && <div style={preview.blur} />}
+                {visibleBlurLayers(state).map((l, i) => (
+                    <div key={l.id} style={preview.blur[i]} />
+                ))}
             </div>
         </div>
     );

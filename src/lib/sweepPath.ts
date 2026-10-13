@@ -9,11 +9,28 @@ import type { BlockState } from '../types';
  * (`radius|angle|alpha|opacity`). Формат пути в целом (белый список семейств)
  * проверяет SWEEP_FIELD_RE в schema.ts на POST; здесь — существование пути в
  * конкретном стейте: null/градиент не задан, индекс за диапазоном, на конце
- * не число → null/false, без бросков.
+ * не число → null/false, без бросков. Плоские `blur.X`-пути (легаси слоя 0)
+ * нормализуются в `blur.layers.0.X` до токенизации (normalizePath).
  */
 
 /** Именованные узлы стейта, допустимые внутри пути (не последний сегмент). */
 const NAME_SEGMENT = /^(?:blur|mask|base|layers|gradient|underlay|stops)$/;
+
+/**
+ * Нормализация плоских blur-путей старого формата в слоевые: `blur.X` без
+ * префикса `layers.`/`underlay.` — алиас слоя 0 → `blur.layers.0.X`
+ * (`blur.radius` → `blur.layers.0.radius`, `blur.gradient.angle` →
+ * `blur.layers.0.gradient.angle`). Единая точка для чтения и записи —
+ * резолвер ниже зовёт её до токенизации.
+ */
+function normalizePath(path: string): string {
+    if (!path.startsWith('blur.')) return path;
+    const rest = path.slice('blur.'.length);
+    if (rest.startsWith('layers.') || rest.startsWith('layers[') || rest.startsWith('underlay.')) {
+        return path;
+    }
+    return `blur.layers.0.${rest}`;
+}
 
 /** Имена числовых листьев — единственно допустимый последний сегмент. */
 const LEAF_SEGMENT = /^(?:radius|angle|alpha|opacity)$/;
@@ -79,7 +96,7 @@ interface LeafSpot {
  * существует, контейнер — массив/примитив.
  */
 function resolveLeafSpot(root: unknown, path: string): LeafSpot | null {
-    const tokens = tokenizePath(path);
+    const tokens = tokenizePath(normalizePath(path));
     if (tokens === null) return null;
     const leaf = tokens[tokens.length - 1];
     if (leaf.kind !== 'name' || !LEAF_SEGMENT.test(leaf.name)) return null;

@@ -26,14 +26,33 @@ const { SWEEP_FIELD_RE, SweepReqSchema, defaultBlockState, uid } = await jiti.im
 );
 const { resolveNumericPath, applyNumericPath } = await jiti.import(`${ROOT}src/lib/sweepPath.ts`);
 
-// ── фикстура: дефолтный стейт + градиенты blur/underlay и слой ──
+// ── фикстура: дефолтный стейт + слои blur (0 — заливка, 1 — маска) и слой ──
 const lin = (angle, stops) => ({ type: 'linear', angle, repeating: false, stops });
 const state = defaultBlockState();
-state.blur.gradient = lin(137, [
-    { id: uid(), pos: 0, color: '#101010', alpha: 0 },
-    { id: uid(), pos: 50, color: '#101010', alpha: 0.42 },
-    { id: uid(), pos: 100, color: '#101010', alpha: 0.8 },
-]);
+state.blur.layers = [
+    {
+        id: uid(),
+        visible: true,
+        radius: 24,
+        background: null,
+        gradient: lin(137, [
+            { id: uid(), pos: 0, color: '#101010', alpha: 0 },
+            { id: uid(), pos: 50, color: '#101010', alpha: 0.42 },
+            { id: uid(), pos: 100, color: '#101010', alpha: 0.8 },
+        ]),
+        mask: null,
+        rect: { x: 0, y: 0, w: 100, h: 100 },
+    },
+    {
+        id: uid(),
+        visible: true,
+        radius: 12,
+        background: null,
+        gradient: null,
+        mask: null,
+        rect: { x: 0, y: 60, w: 100, h: 40 },
+    },
+];
 state.blur.underlay.gradient = lin(180, [
     { id: uid(), pos: 0, color: '#101010', alpha: 0.05 },
     { id: uid(), pos: 100, color: '#101010', alpha: 0.55 },
@@ -65,6 +84,13 @@ const VALID_FIELDS = [
     'blur.underlay.gradient.stops[1].alpha',
     'layers[0].opacity',
     'layers.0.opacity',
+    // слоевые формы blur (i 0..1, скобки и точка)
+    'blur.layers[0].radius',
+    'blur.layers.0.radius',
+    'blur.layers[1].radius',
+    'blur.layers.0.gradient.angle',
+    'blur.layers[1].gradient.stops[2].alpha',
+    'blur.layers.1.gradient.stops.2.alpha',
 ];
 for (const f of VALID_FIELDS) {
     check(`field: ${f} — в белом списке`, SWEEP_FIELD_RE.test(f));
@@ -76,6 +102,8 @@ const INVALID_FIELDS = [
     'base.color', // строка-цвет
     'compare.tolerance', // вне семейств sweep
     'blur.mask.stops[0].alpha', // маска blur не в списке v2
+    'blur.layers[0].mask.stops[0].alpha', // маска слоя не в списке v2
+    'blur.layers[2].radius', // слой всего два (i 0..1)
     'blur.underlay.gradient.angle', // угол underlay не в списке v2
     'base.gradient.angle', // угол базы не в списке v2
     'layers[0].rect.x', // геометрия не числовой лист семейства
@@ -104,16 +132,35 @@ check(
     !SweepReqSchema.safeParse({ field: 'nope', from: 0, to: 1, steps: 2 }).success
 );
 
-// ── resolveNumericPath: чтение значения по пути ──
-check('resolve: blur.radius', resolveNumericPath(state, 'blur.radius') === 24);
-check('resolve: угол blur.gradient', resolveNumericPath(state, 'blur.gradient.angle') === 137);
+// ── resolveNumericPath: чтение значения по пути (алиасы слоя 0 + слоевые) ──
+check('resolve: blur.radius (алиас слоя 0)', resolveNumericPath(state, 'blur.radius') === 24);
 check(
-    'resolve: альфа среднего стопа (скобки)',
+    'resolve: blur.layers.0.radius — та же цель',
+    resolveNumericPath(state, 'blur.layers.0.radius') === 24
+);
+check(
+    'resolve: blur.layers[1].radius — слой 1',
+    resolveNumericPath(state, 'blur.layers[1].radius') === 12
+);
+check(
+    'resolve: угол blur.gradient (алиас)',
+    resolveNumericPath(state, 'blur.gradient.angle') === 137
+);
+check(
+    'resolve: угол blur.layers.0.gradient — та же цель',
+    resolveNumericPath(state, 'blur.layers.0.gradient.angle') === 137
+);
+check(
+    'resolve: альфа среднего стопа (скобки, алиас)',
     resolveNumericPath(state, 'blur.gradient.stops[1].alpha') === 0.42
 );
 check(
     'resolve: альфа среднего стопа (точка) — эквивалент формы',
     resolveNumericPath(state, 'blur.gradient.stops.1.alpha') === 0.42
+);
+check(
+    'resolve: альфа среднего стопа слоевой формой',
+    resolveNumericPath(state, 'blur.layers.0.gradient.stops[1].alpha') === 0.42
 );
 check(
     'resolve: альфа стопа underlay',
@@ -129,11 +176,14 @@ check(
 const NULL_FIELDS = [
     'blur.gradient.stops[9].alpha', // индекс за диапазоном
     'layers[1].opacity', // слоя нет
-    'blur.mask.stops[0].alpha', // blur.mask = null в дефолте
+    'blur.mask.stops[0].alpha', // маски нет (легаси-путь, поля больше не существует)
+    'blur.layers[0].mask.stops[0].alpha', // маска слоя null
+    'blur.radius.x', // лишний сегмент
     'blur.enabled', // не числовой лист
     'base.color', // лист-строка
     'blur', // не лист
-    'blur.gradient', // не лист
+    'blur.gradient', // не лист (алиас резолвится в слой, но лист не тот)
+    'blur.layers.5.radius', // слой за диапазоном
     'blur.radius.extra', // лишний сегмент после листа
     '', // пустой путь
 ];
@@ -141,12 +191,33 @@ for (const f of NULL_FIELDS) {
     check(`resolve: ${f || "''"} → null`, resolveNumericPath(state, f) === null);
 }
 
+// алиас без слоя: дефолтный стейт с layers=[] — слоя 0 нет, путь не существует
+const emptyBlur = defaultBlockState();
+check(
+    'resolve: blur.radius при layers=[] → null',
+    resolveNumericPath(emptyBlur, 'blur.radius') === null
+);
+
 // ── applyNumericPath: запись значения и безопасность ──
 const draft = structuredClone(state);
 check(
-    'apply: альфа стопа записана',
+    'apply: альфа стопа записана (алиас слоя 0)',
     applyNumericPath(draft, 'blur.gradient.stops[1].alpha', 0.75) === true &&
-        draft.blur.gradient.stops[1].alpha === 0.75
+        draft.blur.layers[0].gradient.stops[1].alpha === 0.75
+);
+check(
+    'apply: слоевая форма — та же цель',
+    applyNumericPath(draft, 'blur.layers.0.gradient.stops[1].alpha', 0.3) === true &&
+        draft.blur.layers[0].gradient.stops[1].alpha === 0.3
+);
+check(
+    'apply: радиус слоя 1 записан',
+    applyNumericPath(draft, 'blur.layers[1].radius', 40) === true &&
+        draft.blur.layers[1].radius === 40
+);
+check(
+    'apply: радиус алиасом — в слой 0',
+    applyNumericPath(draft, 'blur.radius', 33) === true && draft.blur.layers[0].radius === 33
 );
 check(
     'apply: точечная форма — та же цель',
@@ -155,10 +226,10 @@ check(
 );
 check(
     'apply: соседи не тронуты',
-    draft.blur.gradient.stops[0].alpha === 0 &&
-        draft.blur.gradient.stops[2].alpha === 0.8 &&
-        draft.blur.gradient.angle === 137 &&
-        state.blur.gradient.stops[1].alpha === 0.42 // исходник не мутирован
+    draft.blur.layers[0].gradient.stops[0].alpha === 0 &&
+        draft.blur.layers[0].gradient.stops[2].alpha === 0.8 &&
+        draft.blur.layers[0].gradient.angle === 137 &&
+        state.blur.layers[0].gradient.stops[1].alpha === 0.42 // исходник не мутирован
 );
 check(
     'apply: не-числовой лист — отказ без записи',

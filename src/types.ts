@@ -12,6 +12,7 @@ export type {
     MaskSpec,
     BlurRect,
     BlurUnderlay,
+    BlurLayer,
     BlurSpec,
     ClipTextSpec,
     CompareSpec,

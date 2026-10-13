@@ -8,6 +8,7 @@ import type {
     AnalysisTransition,
     BlendMode,
     BlockState,
+    BlurRect,
     Gradient,
     GradientTarget,
     LinearGradient,
@@ -196,17 +197,19 @@ function edgeStretch(snapshot: HTMLCanvasElement, pad: number): HTMLCanvasElemen
 /**
  * Приближённый рендер блока в canvas W×H: база (цвет/градиент/картинка с
  * object-fit + вуаль base.gradient поверх неё) → градиентные слои
- * (opacity/blend) → underlay-затемнение → blur-слой → маска блока. Порядок
- * как в экспорте (base → layers → underlay ::before → blur ::after).
- * backdrop-filter эмулируем: подстилающие слои (база+слои+underlay) блюрятся
- * внутри blur.rect через ctx.filter (CSS блюрит и стейдж за блоком — мы
- * приближаем только содержимым блока); при stage.isolated за краем блока
- * блюр сэмплит копии краевых пикселей. Маска blur-слоя применяется к
- * элементу ЦЕЛИКОМ: backdrop-эффект идёт через destination-in с градиентом
- * маски ДО наложения заливки — вклад блюра пропорционален локальной альфе
- * маски (progressive blur), под ним просвечивает неразмытый контент, сверху
- * — маскированная заливка. clip-text canvas не умеет — в дифф попадает
- * «цветовая» часть блока.
+ * (opacity/blend) → underlay-затемнение → blur-слои → маска блока. Порядок
+ * как в экспорте (base → layers → underlay ::before → blur ::after/::before).
+ * blur-слоёв до двух, в DOM-порядке: слой 0 блюрит подстилающие слои, слой 1
+ * поверх — блюрит ТЕКУЩИЙ композит (уже с эффектом слоя 0), как в браузере.
+ * backdrop-filter эмулируем: композит блюрится внутри rect слоя через
+ * ctx.filter (CSS блюрит и стейдж за блоком — мы приближаем только
+ * содержимым блока); при stage.isolated за краем блока блюр сэмплит копии
+ * краевых пикселей. Маска слоя применяется к элементу ЦЕЛИКОМ:
+ * backdrop-эффект идёт через destination-in с градиентом маски ДО наложения
+ * заливки — вклад блюра пропорционален локальной альфе маски (progressive
+ * blur), под ним просвечивает неразмытый контент, сверху — маскированная
+ * заливка. clip-text canvas не умеет — в дифф попадает «цветовая» часть
+ * блока.
  */
 function renderBlock(state: BlockState, baseImg: HTMLCanvasElement | null): HTMLCanvasElement {
     const scale = Math.min(1, MAX_SIDE / Math.max(state.w, state.h));
@@ -285,19 +288,22 @@ function renderBlock(state: BlockState, baseImg: HTMLCanvasElement | null): HTML
         }
     }
 
-    if (state.blur.enabled) {
-        const r = state.blur.rect;
+    // blur-слои в DOM-порядке: каждый блюрит ТЕКУЩИЙ композит канваса
+    // (слой 1 видит уже заблюренный слой 0 в зоне пересечения — как браузер)
+    const activeBlurLayers = state.blur.enabled ? state.blur.layers.filter((l) => l.visible) : [];
+    for (const blurLayer of activeBlurLayers) {
+        const r = blurLayer.rect;
         const rect: RectPx = {
             x: (r.x / 100) * W,
             y: (r.y / 100) * H,
             w: (r.w / 100) * W,
             h: (r.h / 100) * H,
         };
-        // backdrop-эмуляция: снапшот подстилающих слоёв блюрится внутри rect
+        // backdrop-эмуляция: снапшот текущего композита блюрится внутри rect
         // (радиус CSS в px блока -> px канваса через scale); blur у границ rect
         // сэмплит содержимое за его пределами — как настоящий backdrop-filter;
         // при isolated снапшот обрамляется clamp-to-edge полосами ≥ 3σ радиуса
-        const rpx = round2(state.blur.radius * scale);
+        const rpx = round2(blurLayer.radius * scale);
         if (rpx > 0) {
             const snapshot = document.createElement('canvas');
             snapshot.width = W;
@@ -333,7 +339,7 @@ function renderBlock(state: BlockState, baseImg: HTMLCanvasElement | null): HTML
                     blurCtx.drawImage(src, -off, -off);
                     blurCtx.restore();
                     let backdropLayer = blurred;
-                    if (state.blur.mask !== null) {
+                    if (blurLayer.mask !== null) {
                         backdropLayer = document.createElement('canvas');
                         backdropLayer.width = W;
                         backdropLayer.height = H;
@@ -342,7 +348,7 @@ function renderBlock(state: BlockState, baseImg: HTMLCanvasElement | null): HTML
                             maskCtx.drawImage(blurred, 0, 0);
                             maskCtx.save();
                             maskCtx.globalCompositeOperation = 'destination-in';
-                            paintGradient(maskCtx, state.blur.mask, rect);
+                            paintGradient(maskCtx, blurLayer.mask, rect);
                             maskCtx.restore();
                         }
                     }
@@ -351,18 +357,15 @@ function renderBlock(state: BlockState, baseImg: HTMLCanvasElement | null): HTML
             }
         }
         const fill = (c: CanvasRenderingContext2D) => {
-            if (state.blur.gradient !== null) {
-                paintGradient(c, state.blur.gradient, rect);
-            } else if (
-                state.blur.background !== null &&
-                parseRgba(state.blur.background) !== null
-            ) {
-                c.fillStyle = state.blur.background;
+            if (blurLayer.gradient !== null) {
+                paintGradient(c, blurLayer.gradient, rect);
+            } else if (blurLayer.background !== null && parseRgba(blurLayer.background) !== null) {
+                c.fillStyle = blurLayer.background;
                 c.fillRect(rect.x, rect.y, rect.w, rect.h);
             }
         };
-        if (state.blur.mask !== null) {
-            drawMasked(ctx, W, H, fill, state.blur.mask, rect);
+        if (blurLayer.mask !== null) {
+            drawMasked(ctx, W, H, fill, blurLayer.mask, rect);
         } else {
             fill(ctx);
         }
@@ -822,29 +825,41 @@ export async function computeAnalysis(
     // системах координат — классификацию честно помечаем приблизительной (approx)
     let coverage: { c0: number; c1: number } | null = null;
     if (state.blur.enabled) {
+        // у radial нет осевого угла — coverage на вертикальную ось (фолбэк 180°)
+        const angle = axisGradient?.type === 'linear' ? axisGradient.angle : 180;
+        // rect видимых blur-слоёв; зона = union по оси (min c0..max c1)
+        const blurRects = state.blur.layers.filter((l) => l.visible).map((l) => l.rect);
+        const unionCoverage = (project: (rect: BlurRect) => { c0: number; c1: number }) => {
+            const perLayer = blurRects.map(project);
+            return perLayer.length > 0
+                ? {
+                      c0: Math.min(...perLayer.map((c) => c.c0)),
+                      c1: Math.max(...perLayer.map((c) => c.c1)),
+                  }
+                : null;
+        };
         if (axisSpace === 'block') {
-            coverage = rectCoverageOnAxis(
-                state.blur.rect,
-                { x: 0, y: 0, w: W, h: H },
-                axisGradient?.type === 'linear' ? axisGradient.angle : 180
+            coverage = unionCoverage((rect) =>
+                rectCoverageOnAxis(rect, { x: 0, y: 0, w: W, h: H }, angle)
             );
         } else if (axisSpace === 'blur.rect') {
-            // ось уже живёт внутри blur.rect — вся она «зона blur»
+            // ось уже живёт внутри rect blur-слоя — вся она «зона blur»
             coverage = { c0: 0, c1: 100 };
         } else if (axisSpace === 'layer.rect' && axisRect !== undefined && axisBox !== undefined) {
-            // ось живёт в системе rect слоя: переводим blur.rect (% блока) в %
-            // этой системы и проецируем на ось — классификация «зона blur»
-            // продолжает работать для слоя с частичным rect
-            const rel = {
-                x: ((state.blur.rect.x - axisRect.x) / axisRect.w) * 100,
-                y: ((state.blur.rect.y - axisRect.y) / axisRect.h) * 100,
-                w: (state.blur.rect.w / axisRect.w) * 100,
-                h: (state.blur.rect.h / axisRect.h) * 100,
-            };
-            coverage = rectCoverageOnAxis(
-                rel,
-                axisBox,
-                axisGradient?.type === 'linear' ? axisGradient.angle : 180
+            // ось живёт в системе rect слоя: переводим rect видимых blur-слоёв
+            // (% блока) в % этой системы и проецируем на ось — классификация
+            // «зона blur» продолжает работать для слоя с частичным rect
+            coverage = unionCoverage((rect) =>
+                rectCoverageOnAxis(
+                    {
+                        x: ((rect.x - axisRect.x) / axisRect.w) * 100,
+                        y: ((rect.y - axisRect.y) / axisRect.h) * 100,
+                        w: (rect.w / axisRect.w) * 100,
+                        h: (rect.h / axisRect.h) * 100,
+                    },
+                    axisBox,
+                    angle
+                )
             );
         }
     }

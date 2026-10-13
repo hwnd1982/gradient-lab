@@ -17,6 +17,7 @@ const FILES = [
     './analysis.test.mjs',
     './sweep-path.test.mjs',
     './gray-compare.test.mjs',
+    './blur-layers.test.mjs',
 ];
 
 let total = 0;

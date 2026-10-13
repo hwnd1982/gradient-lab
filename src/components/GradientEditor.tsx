@@ -10,7 +10,7 @@ import {
     samplesForMaskTarget,
 } from '../lib/autofit';
 import { getCanvas } from '../lib/imageCache';
-import { assignGradient, isAlphaTarget, targetAxisRect, readGradient } from '../targets';
+import { assignGradient, isAlphaTarget, targetAxisRect, targetToKey, readGradient } from '../targets';
 import type {
     BgLayer,
     BlurRect,
@@ -75,7 +75,9 @@ export function GradientEditor({ target }: GradientEditorProps) {
 
     if (!gradient) return null;
 
-    const targetKey = target.kind === 'layer' ? `layer:${target.index}` : target.kind;
+    // канонический ключ таргета (targetToKey): различает blurMask/blurBg
+    // слоёв 0/1 — fit-бейдж живёт только в редакторе слоя, где сделан подбор
+    const targetKey = targetToKey(target);
     const fitInfo = fit !== null && fit.targetKey === targetKey ? fit : null;
 
     const selectedStop = gradient.stops.find((s) => s.id === selectedStopId) ?? null;

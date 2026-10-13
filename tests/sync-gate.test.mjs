@@ -100,16 +100,16 @@ check(
         entry(['blur.radius'], 97.0, 97.2),
         entry(['blur.radius'], 97.2, 97.3),
         entry(['blur.radius'], 97.3, 97.1),
-    ]).startsWith('Радиус на плато (F2 exit)')
+    ]).startsWith('Blur-ручка на плато (F2 exit)')
 );
 check(
-    'hint 1н: дельта ≥0.5 — не плато, параметр ещё движется → sweep',
+    'hint 1н: дельта ≥0.5 — не плато, blur-маркер живёт → нейтральный sweep-совет',
     computeHint(aBlur, [
         entry(['blur.radius'], 95.0, 97.0),
         entry(['blur.radius'], 97.2, 97.3),
         entry(['blur.radius'], 97.3, 97.1),
     ]) ===
-        'Параметр blur.radius ещё движется — прогони динамику: POST /api/sweep {field:"blur.radius"}'
+        'Ручка внутри blur-слоя ещё движется — продолжай итерации; для динамики доступен POST /api/sweep по точному листу слоя (radius или gradient.stops[i].alpha — что крутишь)'
 );
 check(
     'hint sweep-плато: один числовой лист (угол маски) с живыми дельтами → sweep',

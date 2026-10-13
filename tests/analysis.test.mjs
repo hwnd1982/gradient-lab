@@ -437,14 +437,23 @@ function makeState(radius) {
 
 // ── 5. зона: got α<8 внутри зоны не считается; пустая зона — zoneFallback ──
 {
-    // blurBg-таргет (зона = blur.rect в углу), blur.radius 0 и без заливок —
+    // blurBg-таргет (зона = rect слоя 0 в углу), радиус 0 и без заливок —
     // рендер blur ничего не рисует, зона живёт только в метриках
     const ref = makeRef((x, y, inside) => (inside ? BASE : GARBAGE));
     const s = makeState(R);
     s.blur.enabled = true;
-    s.blur.radius = 0;
-    s.blur.rect = { x: 0, y: 0, w: 25, h: 25 };
-    const part = (await computeAnalysis(s, { kind: 'blurBg' }, ref)).data;
+    s.blur.layers = [
+        {
+            id: 'bl1',
+            visible: true,
+            radius: 0,
+            background: null,
+            gradient: null,
+            mask: null,
+            rect: { x: 0, y: 0, w: 25, h: 25 },
+        },
+    ];
+    const part = (await computeAnalysis(s, { kind: 'blurBg', layer: 0 }, ref)).data;
     check(
         'зона: got α<8 в зоне не считается (мусор клипнутого угла не роняет zoneMatch)',
         part.zoneMatchPercent === 100 && part.zoneFallback === undefined,
@@ -456,9 +465,18 @@ function makeState(radius) {
     const ref2 = makeRef((x, y, inside) => (!inside || (y >= 40 && y < 45) ? GARBAGE : BASE));
     const s2 = makeState(R);
     s2.blur.enabled = true;
-    s2.blur.radius = 0;
-    s2.blur.rect = { x: 0, y: 0, w: 6, h: 6 };
-    const empty = (await computeAnalysis(s2, { kind: 'blurBg' }, ref2)).data;
+    s2.blur.layers = [
+        {
+            id: 'bl2',
+            visible: true,
+            radius: 0,
+            background: null,
+            gradient: null,
+            mask: null,
+            rect: { x: 0, y: 0, w: 6, h: 6 },
+        },
+    ];
+    const empty = (await computeAnalysis(s2, { kind: 'blurBg', layer: 0 }, ref2)).data;
     check(
         'пустая зона: zoneFallback=true, zoneMatchPercent = matchPercent (< 100)',
         empty.zoneFallback === true &&

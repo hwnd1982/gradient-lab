@@ -160,6 +160,28 @@ const state = defaultBlockState();
         'PUT невалидный стейт: 400 + issues',
         badState.status === 400 && Array.isArray(badState.json.issues)
     );
+
+    // легаси-плоский blur (до слоёв): zod-preprocess заворачивает в layers[0]
+    const legacy = {
+        ...state,
+        blur: {
+            enabled: true,
+            radius: 10,
+            background: null,
+            mask: null,
+            underlay: state.blur.underlay,
+        },
+    };
+    const putLegacy = await body(await stateApi.PUT(req('PUT', 'https://x/api/state', legacy)));
+    check('PUT легаси-плоский blur: 200 (миграция на лету)', putLegacy.status === 200);
+    const gotLegacy = await body(await stateApi.GET(req('GET', 'https://x/api/state')));
+    check(
+        'GET после легаси-PUT: канонический слоевой формат',
+        Array.isArray(gotLegacy.json.blur.layers) &&
+            gotLegacy.json.blur.layers.length === 1 &&
+            gotLegacy.json.blur.layers[0].radius === 10,
+        JSON.stringify(gotLegacy.json.blur)
+    );
 }
 
 // ── warnings: 404-cleared до синка, запись, cleared-семантика ──

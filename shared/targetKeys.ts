@@ -5,12 +5,16 @@
  * Валидные ключи ?target= — единый источник: 400-ответ (known) и список в
  * разделе API.md «GET /api/analysis» держать синхронным с этим массивом.
  * 'layer:<index>' — шаблон; канонический ключ — 'layer:N' без ведущих нулей.
+ * 'blurMask:<layer>' / 'blurBg:<layer>' — шаблоны blur-слоёв; слой 0
+ * каноничен без суффикса ('blurMask' / 'blurBg').
  */
 export const KNOWN_TARGET_KEYS = [
     'base',
     'blockMask',
     'blurMask',
     'blurBg',
+    'blurMask:<layer>',
+    'blurBg:<layer>',
     'underlay',
     'clipText',
     'animFrom',
@@ -21,13 +25,19 @@ export const KNOWN_TARGET_KEYS = [
 /**
  * Валидный ?target= → канонический ключ (текстом: сервер только валидирует и
  * передаёт, разбор в таргет делает приложение). 'mask' — алиас blockMask,
- * числовой суффикс layer нормализуется (layer:007 → layer:7).
+ * числовой суффикс layer нормализуется (layer:007 → layer:7); blur-таргет
+ * слоя 0 нормализуется в бессуффиксную форму (blurMask:0 → blurMask).
  */
 export function canonicalTargetKey(raw: string): string | null {
     if (raw === 'mask') return 'blockMask';
     if ((KNOWN_TARGET_KEYS as readonly string[]).includes(raw)) return raw;
-    const m = raw.match(/^layer:(\d+)$/);
+    let m = raw.match(/^layer:(\d+)$/);
     if (m !== null) return `layer:${Number(m[1])}`;
+    m = raw.match(/^(blurMask|blurBg):(\d+)$/);
+    if (m !== null) {
+        const n = Number(m[2]);
+        return n === 0 ? m[1] : `${m[1]}:${n}`;
+    }
     return null;
 }
 

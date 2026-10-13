@@ -75,10 +75,13 @@ function fitValues(
 /** Ключ последнего применённого fit-а: пересчёт только при смене w/h/вьюпорта. */
 let fitKey = '';
 
-/** Один и тот же таргет (kind + index слоя)? Экспорт — общий хелпер для App. */
+/** Один и тот же таргет (kind + индекс слоя/blur-слоя)? Экспорт — общий хелпер для App. */
 export function sameTarget(a: GradientTarget, b: GradientTarget): boolean {
     if (a.kind !== b.kind) return false;
     if (a.kind === 'layer' && b.kind === 'layer') return a.index === b.index;
+    if ((a.kind === 'blurMask' || a.kind === 'blurBg') && a.kind === b.kind) {
+        return a.layer === b.layer;
+    }
     return true;
 }
 

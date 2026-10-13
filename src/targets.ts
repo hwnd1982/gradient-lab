@@ -20,7 +20,7 @@ export function isAlphaTarget(kind: GradientTarget['kind']): boolean {
 
 /**
  * rect-область (% блока), в системе координат которой считается градиент
- * таргета: blurBg/blurMask — blur.rect, underlay — underlay.rect,
+ * таргета: blurBg/blurMask — rect слоя blur из таргета, underlay — underlay.rect,
  * layer:N — rect слоя, undefined — весь блок (оси/центры в % блока).
  * Полный rect слоя ({0,0,100,100}) нормализуем в undefined — поведение
  * бит-в-бит как до появления rect у слоёв.
@@ -29,8 +29,8 @@ export function targetAxisRect(state: BlockState, target: GradientTarget): BlurR
     if (target.kind === 'underlay') {
         return state.blur.underlay.enabled ? state.blur.underlay.rect : undefined;
     }
-    if (isBlurRectTarget(target.kind) && state.blur.enabled) {
-        return state.blur.rect;
+    if ((target.kind === 'blurMask' || target.kind === 'blurBg') && state.blur.enabled) {
+        return state.blur.layers[target.layer]?.rect;
     }
     if (target.kind === 'layer') {
         const layer = state.layers[target.index];
@@ -56,6 +56,11 @@ export function targetToKey(t: GradientTarget): string {
             return `layer:${t.index}`;
         case 'mask':
             return 'blockMask';
+        case 'blurMask':
+        case 'blurBg':
+            // слой 0 — канонический ключ без суффикса (back-compat),
+            // слой 1+ — 'blurMask:1' / 'blurBg:1'
+            return t.layer === 0 ? t.kind : `${t.kind}:${t.layer}`;
         default:
             return t.kind;
     }
@@ -63,8 +68,8 @@ export function targetToKey(t: GradientTarget): string {
 
 const KEY_TARGETS: Record<string, GradientTarget> = {
     base: { kind: 'base' },
-    blurMask: { kind: 'blurMask' },
-    blurBg: { kind: 'blurBg' },
+    blurMask: { kind: 'blurMask', layer: 0 },
+    blurBg: { kind: 'blurBg', layer: 0 },
     underlay: { kind: 'underlay' },
     clipText: { kind: 'clipText' },
     animFrom: { kind: 'animFrom' },
@@ -75,8 +80,14 @@ const KEY_TARGETS: Record<string, GradientTarget> = {
 export function targetFromString(s: string): GradientTarget | null {
     if (s === 'blockMask' || s === 'mask') return { kind: 'mask' };
     if (s in KEY_TARGETS) return KEY_TARGETS[s];
-    const m = s.match(/^layer:(\d+)$/);
+    let m = s.match(/^layer:(\d+)$/);
     if (m !== null) return { kind: 'layer', index: Number(m[1]) };
+    // blur-таргет конкретного слоя: 'blurMask:1' / 'blurBg:1' (слой 0 — без суффикса)
+    m = s.match(/^(blurMask|blurBg):(\d+)$/);
+    if (m !== null) {
+        const layer = Number(m[2]);
+        return m[1] === 'blurMask' ? { kind: 'blurMask', layer } : { kind: 'blurBg', layer };
+    }
     return null;
 }
 
@@ -90,9 +101,9 @@ export function readGradient(state: BlockState, target: GradientTarget): Gradien
         case 'mask':
             return state.mask.gradient;
         case 'blurMask':
-            return state.blur.mask;
+            return state.blur.layers[target.layer]?.mask ?? null;
         case 'blurBg':
-            return state.blur.gradient;
+            return state.blur.layers[target.layer]?.gradient ?? null;
         case 'underlay':
             return state.blur.underlay.gradient;
         case 'clipText':
@@ -118,12 +129,16 @@ export function assignGradient(state: BlockState, target: GradientTarget, next: 
         case 'mask':
             state.mask.gradient = next;
             break;
-        case 'blurMask':
-            state.blur.mask = next;
+        case 'blurMask': {
+            const blurLayer = state.blur.layers[target.layer];
+            if (blurLayer) blurLayer.mask = next;
             break;
-        case 'blurBg':
-            state.blur.gradient = next;
+        }
+        case 'blurBg': {
+            const blurLayer = state.blur.layers[target.layer];
+            if (blurLayer) blurLayer.gradient = next;
             break;
+        }
         case 'underlay':
             state.blur.underlay.gradient = next;
             break;

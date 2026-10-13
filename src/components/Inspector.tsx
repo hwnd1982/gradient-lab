@@ -1,8 +1,9 @@
-import { useRef, useState } from 'react';
+import { Fragment, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { BASE_FITS, BLEND_MODES } from '../constants';
-import { defaultLinearGradient, uid } from '../schema';
+import { defaultBlurLayer, defaultLinearGradient, uid } from '../schema';
 import { fmtNum, parseRgba, rgbaString } from '../lib/color';
+import { blurEdgeIssues } from '../lib/blurEdges';
 import { getImage } from '../lib/imageCache';
 import { fitBlockToAspect } from '../lib/validate';
 import { useLabStore } from '../store';
@@ -95,26 +96,30 @@ function ExportRecalcPanel() {
                 />
             </div>
             <div className="flex flex-col gap-1">
-                {state.blur.enabled && (
-                    <>
-                        <HintRow
-                            label={`blur лево ${fmtNum(state.blur.rect.x)}%`}
-                            value={fromPct(state.blur.rect.x, state.w)}
-                        />
-                        <HintRow
-                            label={`blur право ${fmtNum(state.blur.rect.x + state.blur.rect.w)}%`}
-                            value={fromPct(state.blur.rect.x + state.blur.rect.w, state.w)}
-                        />
-                        <HintRow
-                            label={`blur ширина ${fmtNum(state.blur.rect.w)}%`}
-                            value={fromPct(state.blur.rect.w, state.w)}
-                        />
-                        <HintRow
-                            label={`blur радиус ${fmtNum(state.blur.radius)}px`}
-                            value={chain(state.blur.radius / ex.scale)}
-                        />
-                    </>
-                )}
+                {state.blur.enabled &&
+                    state.blur.layers.map(
+                        (layer, i) =>
+                            layer.visible && (
+                                <Fragment key={layer.id}>
+                                    <HintRow
+                                        label={`блюр ${i + 1} лево ${fmtNum(layer.rect.x)}%`}
+                                        value={fromPct(layer.rect.x, state.w)}
+                                    />
+                                    <HintRow
+                                        label={`блюр ${i + 1} право ${fmtNum(layer.rect.x + layer.rect.w)}%`}
+                                        value={fromPct(layer.rect.x + layer.rect.w, state.w)}
+                                    />
+                                    <HintRow
+                                        label={`блюр ${i + 1} ширина ${fmtNum(layer.rect.w)}%`}
+                                        value={fromPct(layer.rect.w, state.w)}
+                                    />
+                                    <HintRow
+                                        label={`блюр ${i + 1} радиус ${fmtNum(layer.radius)}px`}
+                                        value={chain(layer.radius / ex.scale)}
+                                    />
+                                </Fragment>
+                            )
+                    )}
                 {state.blur.underlay.enabled && (
                     <HintRow
                         label={`underlay высота ${fmtNum(state.blur.underlay.rect.h)}%`}
@@ -125,6 +130,259 @@ function ExportRecalcPanel() {
             <p className="text-[10px] leading-relaxed text-lab-muted">
                 px макета = % кропа / 100 × ширина блока / scale; rem = px / remBase
             </p>
+        </div>
+    );
+}
+
+/**
+ * Карточка blur-слоя (до двух на блок): видимость, радиус, rect-область,
+ * маска растворения (blurMask layer N) и заливка (blurBg layer N).
+ * Слой 0 — «::before», слой 1 — «::after» (пара псевдо или два div — на
+ * усмотрение вёрстки); инлайн-бейдж — жёсткая кромка (маска не доведена до
+ * α≈0 у внутренней границы rect).
+ */
+function BlurLayerCard({ index }: { index: number }) {
+    const state = useLabStore((s) => s.state);
+    const activeTarget = useLabStore((s) => s.activeTarget);
+    const update = useLabStore((s) => s.update);
+    const pushHistory = useLabStore((s) => s.pushHistory);
+    const setActiveTarget = useLabStore((s) => s.setActiveTarget);
+    const layer = state.blur.layers[index];
+    if (layer === undefined) return null;
+    const pseudo = index === 0 ? '::before' : '::after';
+
+    // заливка-цвет хранится rgba-строкой — разбираем для ColorField/слайдера
+    const bgParsed = layer.background
+        ? (parseRgba(layer.background) ?? { hex: '#000000', alpha: 0.2 })
+        : null;
+    const setLayerBackground = (hex: string, alpha: number, transient: boolean) => {
+        update(
+            (d) => {
+                const l = d.blur.layers[index];
+                if (l) l.background = rgbaString(hex, alpha);
+            },
+            { transient }
+        );
+    };
+
+    // жёсткая кромка: rect зажат внутри блока, а маска у кромки не в α0
+    const edgeIssue = blurEdgeIssues(state).find((issue) => issue.layer === index) ?? null;
+
+    const removeLayer = () => {
+        update((d) => {
+            d.blur.layers.splice(index, 1);
+            // удалили последний — глушим мастер-тумблер (секция схлопывается)
+            if (d.blur.layers.length === 0) d.blur.enabled = false;
+        });
+        // таргет удалённого слоя уводим на нейтральный, таргет слоя выше —
+        // сдвигаем вниз (индексы слоёв после splice сместились)
+        if (activeTarget.kind === 'blurMask' || activeTarget.kind === 'blurBg') {
+            if (activeTarget.layer === index) {
+                setActiveTarget({ kind: 'layer', index: 0 });
+            } else if (activeTarget.layer > index) {
+                setActiveTarget({ kind: activeTarget.kind, layer: activeTarget.layer - 1 });
+            }
+        }
+    };
+
+    return (
+        <div className="flex flex-col gap-2.5 rounded-lg border border-lab-border bg-lab-panel2/60 p-2.5">
+            <div className="flex items-center gap-2">
+                <span className="text-[11px] leading-none text-lab-text">
+                    Слой {index + 1} — {pseudo}
+                </span>
+                <div className="ml-auto flex items-center gap-2">
+                    <Toggle
+                        label="Видим"
+                        checked={layer.visible}
+                        onChange={(v) =>
+                            update((d) => {
+                                const l = d.blur.layers[index];
+                                if (l) l.visible = v;
+                            })
+                        }
+                    />
+                    <button
+                        type="button"
+                        title={`Удалить слой ${index + 1}`}
+                        className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-lab-border bg-lab-panel2 text-xs text-lab-muted hover:border-lab-accent hover:text-lab-text"
+                        onClick={removeLayer}
+                    >
+                        ×
+                    </button>
+                </div>
+            </div>
+            {edgeIssue !== null && (
+                <p
+                    className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-amber-400"
+                    title="rect слоя зажат внутри блока, а маска у его кромки не растворяется — видна резкая граница backdrop-filter"
+                >
+                    Жёсткая кромка у {edgeIssue.edges.join(' и ')} границы rect (α маски{' '}
+                    {fmtNum(edgeIssue.maxAlpha, 2)} у кромки) — вытяни стоп до α0 за кромку, позиции
+                    стопов могут быть вне 0–100%
+                </p>
+            )}
+            <NumberField
+                label="Радиус, px"
+                value={layer.radius}
+                min={0}
+                max={200}
+                onChange={(v) =>
+                    update((d) => {
+                        const l = d.blur.layers[index];
+                        if (l) l.radius = v;
+                    })
+                }
+            />
+            <div className="grid grid-cols-2 gap-2">
+                <NumberField
+                    label="Область X, %"
+                    value={layer.rect.x}
+                    step={0.1}
+                    onChange={(v) =>
+                        update((d) => {
+                            const l = d.blur.layers[index];
+                            if (l) l.rect.x = v;
+                        })
+                    }
+                />
+                <NumberField
+                    label="Область Y, %"
+                    value={layer.rect.y}
+                    step={0.1}
+                    onChange={(v) =>
+                        update((d) => {
+                            const l = d.blur.layers[index];
+                            if (l) l.rect.y = v;
+                        })
+                    }
+                />
+                <NumberField
+                    label="Область W, %"
+                    value={layer.rect.w}
+                    min={1}
+                    step={0.1}
+                    onChange={(v) =>
+                        update((d) => {
+                            const l = d.blur.layers[index];
+                            if (l) l.rect.w = v;
+                        })
+                    }
+                />
+                <NumberField
+                    label="Область H, %"
+                    value={layer.rect.h}
+                    min={1}
+                    step={0.1}
+                    onChange={(v) =>
+                        update((d) => {
+                            const l = d.blur.layers[index];
+                            if (l) l.rect.h = v;
+                        })
+                    }
+                />
+            </div>
+            <button
+                type="button"
+                title="Сбросить область слоя на весь блок"
+                className="cursor-pointer rounded-md border border-lab-border bg-lab-panel2 px-2.5 py-1.5 text-xs text-lab-muted hover:border-lab-accent hover:text-lab-text"
+                onClick={() =>
+                    update((d) => {
+                        const l = d.blur.layers[index];
+                        if (l) l.rect = { x: 0, y: 0, w: 100, h: 100 };
+                    })
+                }
+            >
+                Во весь блок
+            </button>
+            <div className="flex flex-col gap-2 border-t border-lab-border pt-2.5">
+                <Toggle
+                    label="Маска растворения"
+                    checked={layer.mask !== null}
+                    onChange={(v) => {
+                        update((d) => {
+                            const l = d.blur.layers[index];
+                            if (l) l.mask = v ? defaultLinearGradient() : null;
+                        });
+                        if (v) setActiveTarget({ kind: 'blurMask', layer: index });
+                    }}
+                />
+                {layer.mask !== null && (
+                    <GradientEditor target={{ kind: 'blurMask', layer: index }} />
+                )}
+            </div>
+            <div className="flex flex-col gap-2 border-t border-lab-border pt-2.5">
+                <SegmentedControl
+                    value={
+                        layer.gradient !== null
+                            ? ('gradient' as const)
+                            : layer.background !== null
+                              ? ('color' as const)
+                              : ('none' as const)
+                    }
+                    options={[
+                        { value: 'none' as const, label: 'Нет' },
+                        { value: 'color' as const, label: 'Цвет' },
+                        { value: 'gradient' as const, label: 'Градиент' },
+                    ]}
+                    onChange={(v) => {
+                        update((d) => {
+                            const l = d.blur.layers[index];
+                            if (l === undefined) return;
+                            if (v === 'none') {
+                                l.gradient = null;
+                                l.background = null;
+                            } else if (v === 'color') {
+                                l.gradient = null;
+                                if (l.background === null) {
+                                    l.background = 'rgba(255, 255, 255, 0.2)';
+                                }
+                            } else if (l.gradient === null) {
+                                l.gradient = defaultLinearGradient(0, [
+                                    { id: uid(), pos: 0, color: '#101010', alpha: 0.4 },
+                                    { id: uid(), pos: 100, color: '#101010', alpha: 0 },
+                                ]);
+                            }
+                        });
+                        if (v === 'gradient') setActiveTarget({ kind: 'blurBg', layer: index });
+                        else if (activeTarget.kind === 'blurBg' && activeTarget.layer === index) {
+                            setActiveTarget({ kind: 'layer', index: 0 });
+                        }
+                    }}
+                />
+                {layer.gradient === null && bgParsed !== null && (
+                    <>
+                        <ColorField
+                            label="Подложка"
+                            value={bgParsed.hex}
+                            onChange={(hex, continuous) =>
+                                setLayerBackground(hex, bgParsed.alpha, continuous === true)
+                            }
+                            onGestureStart={pushHistory}
+                            onClear={() =>
+                                update((d) => {
+                                    const l = d.blur.layers[index];
+                                    if (l) l.background = null;
+                                })
+                            }
+                        />
+                        <UnitSlider
+                            label="Прозрачность подложки"
+                            value={bgParsed.alpha}
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            onChange={(v, continuous) =>
+                                setLayerBackground(bgParsed.hex, v, continuous === true)
+                            }
+                            onGestureStart={pushHistory}
+                        />
+                    </>
+                )}
+                {layer.gradient !== null && (
+                    <GradientEditor target={{ kind: 'blurBg', layer: index }} />
+                )}
+            </div>
         </div>
     );
 }
@@ -230,20 +488,6 @@ export function Inspector() {
                 'Буфер недоступен, используй Ctrl+V в поле референса или загрузи файл'
             );
         }
-    };
-
-    // подложка blur хранится rgba-строкой — разбираем для ColorField/слайдера
-    const blurBgParsed = state.blur.background
-        ? (parseRgba(state.blur.background) ?? { hex: '#000000', alpha: 0.4 })
-        : null;
-
-    const setBlurBackground = (hex: string, alpha: number, transient: boolean) => {
-        update(
-            (d) => {
-                d.blur.background = rgbaString(hex, alpha);
-            },
-            { transient }
-        );
     };
 
     // цвет underlay — тоже rgba-строка
@@ -579,84 +823,54 @@ export function Inspector() {
                     onChange={(v) => {
                         update((d) => {
                             d.blur.enabled = v;
+                            // чистый холст: первое включение создаёт слой 0 по умолчанию
+                            if (v && d.blur.layers.length === 0) {
+                                d.blur.layers = [defaultBlurLayer()];
+                            }
                         });
-                        if (v && state.blur.gradient !== null) setActiveTarget({ kind: 'blurBg' });
+                        // слой с заливкой уже есть — сразу открываем его редактор
+                        const first = state.blur.layers[0];
+                        if (v && first !== undefined && first.gradient !== null) {
+                            setActiveTarget({ kind: 'blurBg', layer: 0 });
+                        }
                     }}
                 />
                 {state.blur.enabled && (
-                    <>
-                        <NumberField
-                            label="Радиус, px"
-                            value={state.blur.radius}
-                            min={0}
-                            max={200}
-                            onChange={(v) =>
-                                update((d) => {
-                                    d.blur.radius = v;
-                                })
-                            }
-                        />
-                        <div className="grid grid-cols-2 gap-2">
-                            <NumberField
-                                label="Область X, %"
-                                value={state.blur.rect.x}
-                                step={0.1}
-                                onChange={(v) =>
-                                    update((d) => {
-                                        d.blur.rect.x = v;
-                                    })
-                                }
-                            />
-                            <NumberField
-                                label="Область Y, %"
-                                value={state.blur.rect.y}
-                                step={0.1}
-                                onChange={(v) =>
-                                    update((d) => {
-                                        d.blur.rect.y = v;
-                                    })
-                                }
-                            />
-                            <NumberField
-                                label="Область W, %"
-                                value={state.blur.rect.w}
-                                min={1}
-                                step={0.1}
-                                onChange={(v) =>
-                                    update((d) => {
-                                        d.blur.rect.w = v;
-                                    })
-                                }
-                            />
-                            <NumberField
-                                label="Область H, %"
-                                value={state.blur.rect.h}
-                                min={1}
-                                step={0.1}
-                                onChange={(v) =>
-                                    update((d) => {
-                                        d.blur.rect.h = v;
-                                    })
-                                }
-                            />
-                        </div>
+                    <div className="flex flex-col gap-2.5">
+                        {state.blur.layers.map((layer, i) => (
+                            <BlurLayerCard key={layer.id} index={i} />
+                        ))}
                         <button
                             type="button"
-                            title="Сбросить область blur-слоя на весь блок"
-                            className="cursor-pointer rounded-md border border-lab-border bg-lab-panel2 px-2.5 py-1.5 text-xs text-lab-muted hover:border-lab-accent hover:text-lab-text"
+                            title="Второй blur-слой: пара ::before/::after — меньший радиус выше, больший ниже (копирует rect/маску последнего)"
+                            className="cursor-pointer rounded-md border border-lab-border bg-lab-panel2 px-2.5 py-1.5 text-xs text-lab-muted hover:border-lab-accent hover:text-lab-text disabled:cursor-default disabled:opacity-40"
+                            disabled={state.blur.layers.length >= 2}
                             onClick={() =>
                                 update((d) => {
-                                    d.blur.rect = { x: 0, y: 0, w: 100, h: 100 };
+                                    // новый слой копирует rect/маску последнего —
+                                    // удобно докручивать поверх готовой геометрии
+                                    const src = d.blur.layers[d.blur.layers.length - 1];
+                                    if (src !== undefined) {
+                                        d.blur.layers.push({ ...structuredClone(src), id: uid() });
+                                    } else {
+                                        d.blur.layers.push(defaultBlurLayer());
+                                    }
                                 })
                             }
                         >
-                            Во весь блок
+                            + слой
                         </button>
-                    </>
+                        <p className="text-[10px] leading-relaxed text-lab-muted">
+                            Два слоя = пара ::before/::after или два div: слой с меньшим радиусом
+                            выше, с большим ниже; верхний блюрит уже заблюренный нижний в зоне
+                            пересечения
+                        </p>
+                    </div>
                 )}
                 {/* underlay рендерится независимо от blur.enabled — контролы
                     доступны всегда, чтобы юзер мог его выключить и без blur */}
                 <div className="flex flex-col gap-2.5 border-t border-lab-border pt-2.5">
+                    {' '}
                     <Toggle
                         label="Подложка затемнения (::before)"
                         checked={underlay.enabled}
@@ -816,96 +1030,6 @@ export function Inspector() {
                         </>
                     )}
                 </div>
-                {state.blur.enabled && (
-                    <>
-                        <SegmentedControl
-                            value={
-                                state.blur.gradient !== null
-                                    ? ('gradient' as const)
-                                    : state.blur.background !== null
-                                      ? ('color' as const)
-                                      : ('none' as const)
-                            }
-                            options={[
-                                { value: 'none' as const, label: 'Нет' },
-                                { value: 'color' as const, label: 'Цвет' },
-                                { value: 'gradient' as const, label: 'Градиент' },
-                            ]}
-                            onChange={(v) => {
-                                update((d) => {
-                                    if (v === 'none') {
-                                        d.blur.gradient = null;
-                                        d.blur.background = null;
-                                    } else if (v === 'color') {
-                                        d.blur.gradient = null;
-                                        if (d.blur.background === null) {
-                                            d.blur.background = 'rgba(255, 255, 255, 0.2)';
-                                        }
-                                    } else {
-                                        if (d.blur.gradient === null) {
-                                            d.blur.gradient = defaultLinearGradient(0, [
-                                                { id: uid(), pos: 0, color: '#101010', alpha: 0.4 },
-                                                { id: uid(), pos: 100, color: '#101010', alpha: 0 },
-                                            ]);
-                                        }
-                                    }
-                                });
-                                if (v === 'gradient') setActiveTarget({ kind: 'blurBg' });
-                                else if (activeTarget.kind === 'blurBg') {
-                                    setActiveTarget({ kind: 'layer', index: 0 });
-                                }
-                            }}
-                        />
-                        {state.blur.gradient === null && blurBgParsed !== null && (
-                            <>
-                                <ColorField
-                                    label="Подложка"
-                                    value={blurBgParsed.hex}
-                                    onChange={(hex, continuous) =>
-                                        setBlurBackground(
-                                            hex,
-                                            blurBgParsed.alpha,
-                                            continuous === true
-                                        )
-                                    }
-                                    onGestureStart={pushHistory}
-                                    onClear={() =>
-                                        update((d) => {
-                                            d.blur.background = null;
-                                        })
-                                    }
-                                />
-                                <UnitSlider
-                                    label="Прозрачность подложки"
-                                    value={blurBgParsed.alpha}
-                                    min={0}
-                                    max={1}
-                                    step={0.01}
-                                    onChange={(v, continuous) =>
-                                        setBlurBackground(blurBgParsed.hex, v, continuous === true)
-                                    }
-                                    onGestureStart={pushHistory}
-                                />
-                            </>
-                        )}
-                        {state.blur.gradient !== null && (
-                            <GradientEditor target={{ kind: 'blurBg' }} />
-                        )}
-                        <Toggle
-                            label="Маска на blur"
-                            checked={state.blur.mask !== null}
-                            onChange={(v) => {
-                                update((d) => {
-                                    d.blur.mask = v ? defaultLinearGradient() : null;
-                                });
-                                if (v) setActiveTarget({ kind: 'blurMask' });
-                            }}
-                        />
-                        {state.blur.mask !== null && (
-                            <GradientEditor target={{ kind: 'blurMask' }} />
-                        )}
-                    </>
-                )}
             </CollapsibleSection>
 
             <CollapsibleSection title="Текст с градиентом" defaultOpen={false}>

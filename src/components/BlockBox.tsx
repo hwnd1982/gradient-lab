@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { clipTextFontSize, gradientToCss, stateToPreview } from '../cssgen';
+import { clipTextFontSize, gradientToCss, stateToPreview, visibleBlurLayers } from '../cssgen';
 import { fmtNum } from '../lib/color';
 import { useLabStore } from '../store';
 
@@ -11,7 +11,7 @@ interface BlockBoxProps {
 /** Фаза цикла проигрывания анимации маски. */
 type AnimPhase = 'from' | 'to';
 
-/** Визуал блока: base (цвет/img + вуаль градиента) -> градиентные слои -> underlay -> blur-слой (как в экспорте); clip-text вместо base. */
+/** Визуал блока: base (цвет/img + вуаль градиента) -> градиентные слои -> underlay -> blur-слои (как в экспорте); clip-text вместо base. */
 export function BlockBox({ onPointerDown }: BlockBoxProps) {
     const state = useLabStore((s) => s.state);
     const animPlaying = useLabStore((s) => s.animPlaying);
@@ -129,7 +129,9 @@ export function BlockBox({ onPointerDown }: BlockBoxProps) {
                 (layer, i) => layer.visible && <div key={layer.id} style={preview.layers[i]} />
             )}
             {preview.underlay && <div style={preview.underlay} />}
-            {preview.blur && <div style={preview.blur} />}
+            {visibleBlurLayers(state).map((layer, i) => (
+                <div key={layer.id} style={preview.blur[i]} />
+            ))}
         </div>
     );
 }

@@ -68,11 +68,18 @@ function blur(
 ): BlurSpec {
     return {
         enabled: true,
-        radius,
-        background: opts.background ?? null,
-        gradient: opts.gradient ?? null,
-        mask: opts.mask ?? null,
-        rect: opts.rect ?? { x: 0, y: 0, w: 100, h: 100 },
+        // один слой (вторая пара ::before/::after добавляется в инспекторе)
+        layers: [
+            {
+                id: uid(),
+                visible: true,
+                radius,
+                background: opts.background ?? null,
+                gradient: opts.gradient ?? null,
+                mask: opts.mask ?? null,
+                rect: opts.rect ?? { x: 0, y: 0, w: 100, h: 100 },
+            },
+        ],
         underlay: {
             enabled: false,
             rect: { x: 0, y: 0, w: 100, h: 100 },

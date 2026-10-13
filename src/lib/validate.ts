@@ -1,7 +1,8 @@
 import { rectCoverageOnAxis } from './axis';
+import { blurEdgeWarnings } from './blurEdges';
 import { fmtNum } from './color';
 import { readGradient, targetFromString } from '../targets';
-import type { Analysis, BlockState, GradientTarget, Warning } from '../types';
+import type { Analysis, BlockState, BlurRect, GradientTarget, Warning } from '../types';
 
 /** Аспекты картинок (naturalWidth/naturalHeight); null — нет картинки или не загрузилась. */
 export interface ImageAspects {
@@ -19,6 +20,18 @@ function aspectDiff(a: number, b: number): number {
     return Math.abs(a - b) / Math.abs(b);
 }
 
+/** bbox-union rect видимых blur-слоёв (зона эффекта блюра в % блока). */
+function unionBlurRect(state: BlockState): BlurRect | null {
+    if (!state.blur.enabled) return null;
+    const rects = state.blur.layers.filter((l) => l.visible).map((l) => l.rect);
+    if (rects.length === 0) return null;
+    const x0 = Math.min(...rects.map((r) => r.x));
+    const y0 = Math.min(...rects.map((r) => r.y));
+    const x1 = Math.max(...rects.map((r) => r.x + r.w));
+    const y1 = Math.max(...rects.map((r) => r.y + r.h));
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
 /**
  * Размеры блока под аспект картинки с меньшей деформацией: сохраняется та
  * сторона, чья относительная правка меньше (вторая подгоняется под аспект).
@@ -32,7 +45,8 @@ export function fitBlockToAspect(w: number, h: number, aspect: number): { w: num
 /**
  * Борт-контроль старта: чистая проверка стейта на типовые ошибки подбора
  * (аспекты картинок, трансформ референса, покрытие переходов зоной blur,
- * дубли стопов, нулевой радиус). Результат уходит в UI и на GET /api/warnings.
+ * дубли стопов, нулевой радиус, жёсткая кромка blur-слоёв). Результат уходит
+ * в UI и на GET /api/warnings.
  */
 export function validateStart(
     state: BlockState,
@@ -97,35 +111,39 @@ export function validateStart(
         }
     }
 
-    // 4. переходы референса вне зоны blur (ступени, которые rect не накрывает)
+    // 4. переходы референса вне зоны blur (ступени, которые rect не накрывает);
+    // зона — union rect видимых blur-слоёв
     if (
         analysis !== null &&
         state.blur.enabled &&
         analysis.axisSpace === 'block' &&
         analysis.transitions.length > 0
     ) {
-        const analysisTarget = targetFromString(analysis.target);
-        const gradient = analysisTarget !== null ? readGradient(state, analysisTarget) : null;
-        const angle = gradient?.type === 'linear' ? gradient.angle : 180;
-        // у radial нет осевого угла — coverage считается на вертикальную ось
-        // (фолбэк 180°), геометрически это приближение: помечаем в сообщении
-        const radialApprox = gradient?.type === 'radial';
-        const { c0, c1 } = rectCoverageOnAxis(
-            state.blur.rect,
-            { x: 0, y: 0, w: state.w, h: state.h },
-            angle
-        );
-        const outside = analysis.transitions.filter(
-            (t) => t.pos < c0 - COVERAGE_MARGIN || t.pos > c1 + COVERAGE_MARGIN
-        );
-        if (outside.length > 0) {
-            const from = Math.min(...outside.map((t) => t.pos));
-            const to = Math.max(...outside.map((t) => t.pos));
-            warnings.push({
-                code: 'blur-coverage',
-                severity: 'warn',
-                message: `зона эффекта не накрывает переходы: ступени на ${fmtNum(from)}–${fmtNum(to)}%, rect покрывает ${fmtNum(c0)}–${fmtNum(c1)}%${radialApprox ? ' (приближённая оценка для radial)' : ''}`,
-            });
+        const unionRect = unionBlurRect(state);
+        if (unionRect !== null) {
+            const analysisTarget = targetFromString(analysis.target);
+            const gradient = analysisTarget !== null ? readGradient(state, analysisTarget) : null;
+            const angle = gradient?.type === 'linear' ? gradient.angle : 180;
+            // у radial нет осевого угла — coverage считается на вертикальную ось
+            // (фолбэк 180°), геометрически это приближение: помечаем в сообщении
+            const radialApprox = gradient?.type === 'radial';
+            const { c0, c1 } = rectCoverageOnAxis(
+                unionRect,
+                { x: 0, y: 0, w: state.w, h: state.h },
+                angle
+            );
+            const outside = analysis.transitions.filter(
+                (t) => t.pos < c0 - COVERAGE_MARGIN || t.pos > c1 + COVERAGE_MARGIN
+            );
+            if (outside.length > 0) {
+                const from = Math.min(...outside.map((t) => t.pos));
+                const to = Math.max(...outside.map((t) => t.pos));
+                warnings.push({
+                    code: 'blur-coverage',
+                    severity: 'warn',
+                    message: `зона эффекта не накрывает переходы: ступени на ${fmtNum(from)}–${fmtNum(to)}%, rect покрывает ${fmtNum(c0)}–${fmtNum(c1)}%${radialApprox ? ' (приближённая оценка для radial)' : ''}`,
+                });
+            }
         }
     }
 
@@ -153,14 +171,21 @@ export function validateStart(
         }
     }
 
-    // 6. blur без радиуса
-    if (state.blur.enabled && state.blur.radius <= 0) {
-        warnings.push({
-            code: 'blur-zero-radius',
-            severity: 'warn',
-            message: 'blur включён, радиус нулевой — backdrop-эффекта нет',
+    // 6. blur без радиуса (по каждому видимому слою)
+    if (state.blur.enabled) {
+        state.blur.layers.forEach((layer, i) => {
+            if (!layer.visible || layer.radius > 0) return;
+            warnings.push({
+                code: 'blur-zero-radius',
+                severity: 'warn',
+                message: `blur-слой ${i + 1} включён с радиусом 0 — backdrop-эффекта нет`,
+            });
         });
     }
+
+    // 7. жёсткая кромка: rect слоя зажат внутри блока, а маска у кромки не
+    // доведена до α≈0 — видна резкая граница backdrop-filter
+    warnings.push(...blurEdgeWarnings(state));
 
     return warnings;
 }

@@ -1,4 +1,5 @@
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
@@ -16,6 +17,8 @@ import type { JournalEntry, SweepPoint, SweepReq } from '../src/schema.ts';
 import { METHODOLOGY } from '../src/lib/methodology.ts';
 // чистые хелперы, общие с прод-функциями api/ (единый источник KNOWN_TARGET_KEYS)
 import { canonicalTargetKey, KNOWN_TARGET_KEYS, sanitizeName } from '../shared/targetKeys.ts';
+// контракт ассетов картинок — тот же, что в прод-KV (shared/assets.ts)
+import { ASSET_HASH_RE, extractAssetRefs } from '../shared/assets.ts';
 
 /** Интервал heartbeat для SSE-клиентов. */
 const HEARTBEAT_MS = 25_000;
@@ -89,14 +92,71 @@ function parseStateBody(raw: string): { code: number; payload: unknown } | { dat
     return { data: JSON.stringify(parsed.data) };
 }
 
+/** Тело __sync/PUT state: BlockState или {state, assets?} — как на проде. */
+const StateWithAssetsSchema = z.union([
+    z.object({
+        state: BlockStateSchema,
+        assets: z.record(z.string().regex(ASSET_HASH_RE), z.string()).optional(),
+    }),
+    BlockStateSchema,
+]);
+
+function parseSyncBody(
+    raw: string
+): { code: number; payload: unknown } | { data: string; assets: Record<string, string> | null } {
+    let json: unknown;
+    try {
+        json = JSON.parse(raw);
+    } catch {
+        return { code: 400, payload: { error: 'тело запроса не является JSON' } };
+    }
+    const wrapped = StateWithAssetsSchema.safeParse(json);
+    if (wrapped.success && 'state' in wrapped.data) {
+        return {
+            data: JSON.stringify(wrapped.data.state),
+            assets: wrapped.data.assets ?? null,
+        };
+    }
+    const bare = BlockStateSchema.safeParse(json);
+    if (!bare.success) {
+        return { code: 400, payload: { error: 'invalid BlockState', issues: bare.error.issues } };
+    }
+    return { data: JSON.stringify(bare.data), assets: null };
+}
+
+/** sha256 → hex lowercase (dev-сторона ассетов — как node:crypto в прод-kv). */
+function sha256Hex(text: string): string {
+    return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/** Проверка ассета: формат ключа + dataURL + хэш контент-адресный. */
+function checkAsset(hash: string, dataUrl: string): { code: number; payload: unknown } | null {
+    if (!ASSET_HASH_RE.test(hash)) {
+        return { code: 400, payload: { error: 'невалидный hash: ожидается sha256-<64 hex lowercase>' } };
+    }
+    if (!dataUrl.startsWith('data:')) {
+        return { code: 400, payload: { error: 'ассет — dataURL-строка (data:image/...;base64,...)' } };
+    }
+    if (sha256Hex(dataUrl) !== hash.slice('sha256-'.length)) {
+        return { code: 400, payload: { error: 'hash ассета не совпадает с содержимым dataURL' } };
+    }
+    return null;
+}
+
 /**
  * Dev-only Agent API (см. API.md): чтение/запись стейта live через SSE,
  * JSON-schema, файловые пресеты в presets/. В build неактивен (apply: 'serve').
  */
 export function agentApi(): Plugin {
     let root = process.cwd();
-    /** Последний стейт (канонический JSON): от браузера (POST /__sync) или агента (PUT /state). */
+    /** Последний стейт (канонический JSON, картинки — asset-ссылками): от браузера (POST /__sync) или агента (PUT /state). */
     let cachedState: string | null = null;
+    /**
+     * Ассеты картинок стейта: hash 'sha256-<hex>' → dataURL, в памяти процесса
+     * (симметрия с прод-KV lab:asset:*). SETNX-семантика: существующий не
+     * перезаписываем. Переживает reload страниц, умирает с dev-сервером.
+     */
+    const assetStore = new Map<string, string>();
     /** Последний diff-анализ (JSON) от браузера (POST /__analysis). */
     let cachedAnalysis: string | null = null;
     /** Таргет последнего закэшированного анализа (из payload.target). */
@@ -127,6 +187,24 @@ export function agentApi(): Plugin {
     const broadcast = (payload: unknown): void => {
         const data = `data: ${JSON.stringify(payload)}\n\n`;
         for (const res of sseClients) res.write(data);
+    };
+
+    /**
+     * Вынести инлайн-dataURL стейта в asset-мапу (dev-аналог lightenState в
+     * прод-kv): кэш и SSE несут asset-ссылки, dataURL живут в assetStore.
+     * Общий путь PUT /state и POST /__sync — как прод /api/sync, который
+     * облегчает стейт в writeStateVersion при любом виде тела.
+     */
+    const lightenCached = async (state: object): Promise<object> => {
+        const light = await extractAssetRefs(state, (dataUrl) =>
+            Promise.resolve(`sha256-${sha256Hex(dataUrl)}`)
+        );
+        if (light.assets !== undefined) {
+            for (const [hash, dataUrl] of Object.entries(light.assets)) {
+                if (!assetStore.has(hash)) assetStore.set(hash, dataUrl);
+            }
+        }
+        return light.state;
     };
 
     async function listPresets(): Promise<(PresetFileOk | PresetFileErr)[]> {
@@ -171,14 +249,28 @@ export function agentApi(): Plugin {
             return;
         }
 
-        // браузер присылает текущий стейт (кэшируется, НЕ броадкастится)
+        // браузер присылает текущий стейт (кэшируется, НЕ броадкастится):
+        // транспортный вид {state, assets?} — dataURL картинок вынесены в
+        // словарь, в стейте — asset-ссылки (тот же контракт, что на проде)
         if (method === 'POST' && url === '/__sync') {
-            const result = parseStateBody(await readBody(req));
+            const result = parseSyncBody(await readBody(req));
             if ('payload' in result) {
                 sendJson(res, result.code, result.payload);
                 return;
             }
-            cachedState = result.data;
+            if (result.assets !== null) {
+                for (const [hash, dataUrl] of Object.entries(result.assets)) {
+                    const err = checkAsset(hash, dataUrl);
+                    if (err !== null) {
+                        sendJson(res, err.code, err.payload);
+                        return;
+                    }
+                    if (!assetStore.has(hash)) assetStore.set(hash, dataUrl);
+                }
+            }
+            // голый инлайн-стейт (dev-стиль) — облегчаем тем же путём, что и
+            // PUT /state: прод /api/sync всегда пишет слот с asset-ссылками
+            cachedState = JSON.stringify(await lightenCached(JSON.parse(result.data)));
             sendJson(res, 200, { ok: true });
             return;
         }
@@ -472,15 +564,27 @@ export function agentApi(): Plugin {
             return;
         }
 
-        // агент кладёт стейт — все подключённые браузеры получают его по SSE
+        // агент кладёт стейт — все подключённые браузеры получают его по SSE.
+        // Инлайн-dataURL картинок выносятся в asset-мапу (как lightenState в
+        // прод-kv): кэш и SSE несут asset-ссылки, браузер резолвит их сам
         if (method === 'PUT' && url === '/state') {
-            const result = parseStateBody(await readBody(req));
+            const result = parseSyncBody(await readBody(req));
             if ('payload' in result) {
                 sendJson(res, result.code, result.payload);
                 return;
             }
-            cachedState = result.data;
-            broadcast({ type: 'state', state: JSON.parse(result.data) });
+            if (result.assets !== null) {
+                for (const [hash, dataUrl] of Object.entries(result.assets)) {
+                    const err = checkAsset(hash, dataUrl);
+                    if (err !== null) {
+                        sendJson(res, err.code, err.payload);
+                        return;
+                    }
+                    if (!assetStore.has(hash)) assetStore.set(hash, dataUrl);
+                }
+            }
+            cachedState = JSON.stringify(await lightenCached(JSON.parse(result.data)));
+            broadcast({ type: 'state', state: JSON.parse(cachedState) });
             sendJson(res, 200, { ok: true });
             return;
         }
@@ -503,6 +607,70 @@ export function agentApi(): Plugin {
                 clearInterval(heartbeat);
                 sseClients.delete(res);
             });
+            return;
+        }
+
+        // ассеты картинок стейта — контракт прода (GET/PUT /api/asset/<hash>,
+        // см. «Ассеты картинок» в API.md): path- и query-формы (?hash=)
+        const assetBase = url.split('?')[0];
+        const assetPathMatch = assetBase.match(/^\/asset\/(sha256-[0-9a-f]{64})$/);
+        // прод (hashFromRequest) отвечает 400 на любой /asset/<hash> с битым
+        // форматом, а не 404 «неизвестный маршрут» — выравниваем до fallthrough
+        if (
+            method === 'GET' &&
+            assetPathMatch === null &&
+            assetBase.match(/^\/asset\/([^/]+)$/) !== null
+        ) {
+            sendJson(res, 400, { error: 'невалидный hash: ожидается sha256-<64 hex lowercase>' });
+            return;
+        }
+        if (method === 'GET' && (assetPathMatch !== null || assetBase === '/asset')) {
+            const queryStart = url.indexOf('?');
+            const hash =
+                assetPathMatch?.[1] ??
+                (queryStart >= 0 ? new URLSearchParams(url.slice(queryStart + 1)).get('hash') : null);
+            if (hash === null || hash === undefined) {
+                sendJson(res, 400, { error: 'невалидный hash: ожидается sha256-<64 hex lowercase>' });
+                return;
+            }
+            const dataUrl = assetStore.get(hash);
+            if (dataUrl === undefined) {
+                sendJson(res, 404, { error: `ассет ${hash} не найден` });
+                return;
+            }
+            sendJson(res, 200, { dataURL: dataUrl });
+            return;
+        }
+        if (method === 'PUT' && (assetPathMatch !== null || assetBase === '/asset')) {
+            const queryStart = url.indexOf('?');
+            const hash =
+                assetPathMatch?.[1] ??
+                (queryStart >= 0 ? new URLSearchParams(url.slice(queryStart + 1)).get('hash') : null);
+            if (hash === null || hash === undefined) {
+                sendJson(res, 400, { error: 'невалидный hash: ожидается sha256-<64 hex lowercase>' });
+                return;
+            }
+            const dataUrl = await readBody(req);
+            // SETNX-семантика прода (putAsset): формат ключа/тела проверяем
+            // всегда, а сверку хэша с телом — только для НОВОГО ключа;
+            // существующий — 200 без сверки (целостность не страдает: тело
+            // нового ключа сверяется с хэшем)
+            if (!ASSET_HASH_RE.test(hash)) {
+                sendJson(res, 400, { error: 'невалидный hash: ожидается sha256-<64 hex lowercase>' });
+                return;
+            }
+            if (!dataUrl.startsWith('data:')) {
+                sendJson(res, 400, { error: 'ассет — dataURL-строка (data:image/...;base64,...)' });
+                return;
+            }
+            if (!assetStore.has(hash)) {
+                if (sha256Hex(dataUrl) !== hash.slice('sha256-'.length)) {
+                    sendJson(res, 400, { error: 'hash ассета не совпадает с содержимым dataURL' });
+                    return;
+                }
+                assetStore.set(hash, dataUrl);
+            }
+            sendJson(res, 200, { ok: true, hash });
             return;
         }
 

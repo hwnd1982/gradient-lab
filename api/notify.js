@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 //#region node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
 	const numericValues = Object.values(entries).filter((v) => typeof v === "number");
@@ -1012,6 +1013,7 @@ function datetime(args) {
 	return new RegExp(`^${dateSource}T(?:${timeRegex})$`);
 }
 const anyString = /^[\s\S]{0,}$/;
+const integer = /^-?\d+$/;
 const number$1 = /^-?\d+(?:\.\d+)?$/;
 const boolean$1 = /^(?:true|false)$/i;
 const lowercase = /^[^A-Z]*$/;
@@ -2501,6 +2503,138 @@ function handleTupleResults(itemResults, final, items, input, optoutStart) {
 	else break;
 	return final;
 }
+const $ZodRecord = /*@__PURE__*/ $constructor("$ZodRecord", (inst, def) => {
+	$ZodType.init(inst, def);
+	const memo = globalConfig.memoizer;
+	memo?.attach(inst);
+	inst._zod.parse = (payload, ctx) => {
+		const input = payload.value;
+		if (!isPlainObject(input)) {
+			payload.issues.push({
+				expected: "record",
+				code: "invalid_type",
+				input,
+				inst
+			});
+			return payload;
+		}
+		const proms = [];
+		const values = def.keyType._zod.values;
+		if (values && !def.partial) {
+			payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
+			const recordKeys = /* @__PURE__ */ new Set();
+			for (const key of values) if (typeof key === "string" || typeof key === "number" || typeof key === "symbol") {
+				recordKeys.add(typeof key === "number" ? key.toString() : key);
+				if (key === "__proto__") continue;
+				const keyResult = def.keyType._zod.run({
+					value: key,
+					issues: []
+				}, ctx);
+				if (keyResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+				if (keyResult.issues.length) {
+					payload.issues.push({
+						code: "invalid_key",
+						origin: "record",
+						issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+						input: key,
+						path: [key],
+						inst
+					});
+					continue;
+				}
+				const outKey = keyResult.value;
+				if (outKey === "__proto__") continue;
+				const result = def.valueType._zod.run({
+					value: input[key],
+					issues: []
+				}, ctx);
+				if (result instanceof Promise) proms.push(result.then((result) => {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}));
+				else {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}
+			}
+			let unrecognized;
+			for (const key in input) if (!recordKeys.has(key)) {
+				if (def.mode === "loose") {
+					if (key === "__proto__") continue;
+					payload.value[key] = input[key];
+				} else {
+					unrecognized = unrecognized ?? [];
+					unrecognized.push(key);
+				}
+			}
+			if (unrecognized && unrecognized.length > 0) payload.issues.push({
+				code: "unrecognized_keys",
+				input,
+				inst,
+				keys: unrecognized,
+				continue: true
+			});
+		} else {
+			payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
+			let unrecognized;
+			for (const key of Reflect.ownKeys(input)) {
+				if (key === "__proto__") continue;
+				if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
+				let keyResult = def.keyType._zod.run({
+					value: key,
+					issues: []
+				}, ctx);
+				if (keyResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+				if (typeof key === "string" && number$1.test(key) && keyResult.issues.length) {
+					const retryResult = def.keyType._zod.run({
+						value: Number(key),
+						issues: []
+					}, ctx);
+					if (retryResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+					if (retryResult.issues.length === 0) keyResult = retryResult;
+				}
+				if (keyResult.issues.length) {
+					if (def.mode === "loose") payload.value[key] = input[key];
+					else if (values) {
+						unrecognized = unrecognized ?? [];
+						unrecognized.push(key);
+					} else payload.issues.push({
+						code: "invalid_key",
+						origin: "record",
+						issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+						input: key,
+						path: [key],
+						inst
+					});
+					continue;
+				}
+				const outKey = keyResult.value;
+				if (outKey === "__proto__") continue;
+				const result = def.valueType._zod.run({
+					value: input[key],
+					issues: []
+				}, ctx);
+				if (result instanceof Promise) proms.push(result.then((result) => {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}));
+				else {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}
+			}
+			if (unrecognized && unrecognized.length > 0) payload.issues.push({
+				code: "unrecognized_keys",
+				input,
+				inst,
+				keys: unrecognized,
+				continue: true
+			});
+		}
+		if (proms.length) return Promise.all(proms).then(() => payload);
+		return payload;
+	};
+});
 const $ZodEnum = /*@__PURE__*/ $constructor("$ZodEnum", (inst, def) => {
 	$ZodType.init(inst, def);
 	const values = getEnumValues(def.entries);
@@ -4444,6 +4578,107 @@ const tupleProcessor = (schema, ctx, _json, params) => {
 	if (typeof minimum === "number") json.minItems = minimum;
 	if (typeof maximum === "number") json.maxItems = maximum;
 };
+/** JSON object keys are always strings, so a numeric record key schema is re-expressed over the
+* numeric-string form the record parser matches. Deferred to `finalize`, after the flatten: a key
+* behind a wrapper only carries its own `type` before then, and a union key only has its branches.
+*
+* A numeric bound cannot apply to a property name, so `minimum` and its siblings are dropped rather
+* than carried over: keeping them beside `type: "string"` reproduces the match-nothing schema this
+* exists to fix. A key that carries one therefore emits wider than the record parses — `z.record(z.number().min(5), V)`
+* accepts `"3"` — which is the deliberate trade, since throwing on it would reject an ordinary schema
+* outright. */
+function stringifyKeyNames(bySchema, json, visited) {
+	if (json.$ref) {
+		if (visited.has(json)) return json;
+		visited.add(json);
+		const def = bySchema.get(json)?.def;
+		if (!def) return json;
+		const inlined = stringifyKeyNames(bySchema, def, visited);
+		return inlined === def ? json : inlined;
+	}
+	for (const keyword of ["anyOf", "oneOf"]) {
+		const branches = json[keyword];
+		if (!Array.isArray(branches)) continue;
+		const mapped = branches.map((branch) => stringifyKeyNames(bySchema, branch, visited));
+		if (mapped.some((branch, i) => branch !== branches[i])) json = {
+			...json,
+			[keyword]: mapped
+		};
+	}
+	const types = Array.isArray(json.type) ? json.type : [json.type];
+	const numericType = !types.includes("string") && types.some((t) => t === "number" || t === "integer");
+	const values = json.enum ?? (json.const !== void 0 ? [json.const] : void 0);
+	if (!numericType && !values?.some((v) => typeof v === "number")) return json;
+	const { minimum, maximum, exclusiveMinimum, exclusiveMaximum, multipleOf, format, id, ...rest } = json;
+	if (rest.enum) rest.enum = rest.enum.map((v) => typeof v === "number" ? String(v) : v);
+	else if (typeof rest.const === "number") rest.const = String(rest.const);
+	if (!numericType) return rest;
+	rest.type = "string";
+	if (!values) rest.pattern = (types.includes("number") ? number$1 : integer).source;
+	return rest;
+}
+/** Every record of one conversion, so the carriers are found in a single pass rather than once per record. */
+const pendingRecords = /* @__PURE__ */ new WeakMap();
+function rewriteKeyNames(ctx) {
+	const bySchema = /* @__PURE__ */ new Map();
+	for (const entry of ctx.seen.values()) if (entry.def && !bySchema.has(entry.schema)) bySchema.set(entry.schema, entry);
+	const rewrites = /* @__PURE__ */ new Map();
+	for (const record of pendingRecords.get(ctx) ?? []) {
+		const seen = ctx.seen.get(record);
+		const names = (seen?.def ?? seen?.schema)?.propertyNames;
+		if (!names || names === true || rewrites.has(names)) continue;
+		const rewritten = stringifyKeyNames(bySchema, names, /* @__PURE__ */ new Set());
+		if (rewritten !== names) rewrites.set(names, rewritten);
+	}
+	if (!rewrites.size) return;
+	for (const entry of ctx.seen.values()) for (const carrier of [entry.schema, entry.def]) {
+		const rewritten = carrier && rewrites.get(carrier.propertyNames);
+		if (rewritten) carrier.propertyNames = rewritten;
+	}
+}
+const recordProcessor = (schema, ctx, _json, params) => {
+	const json = _json;
+	const def = schema._zod.def;
+	json.type = "object";
+	const keyType = def.keyType;
+	const patterns = aggregateChecks(keyType).patterns;
+	if (def.mode === "loose" && patterns && patterns.size > 0) {
+		const valueSchema = processSchema(def.valueType, ctx, {
+			...params,
+			path: [
+				...params.path,
+				"patternProperties",
+				"*"
+			]
+		});
+		json.patternProperties = {};
+		for (const pattern of patterns) assignProp(json.patternProperties, exactPattern(pattern).source, valueSchema);
+	} else {
+		if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
+			json.propertyNames = processSchema(def.keyType, ctx, {
+				...params,
+				path: [...params.path, "propertyNames"]
+			});
+			let pending = pendingRecords.get(ctx);
+			if (!pending) {
+				pending = [];
+				pendingRecords.set(ctx, pending);
+				ctx.deferred.push(() => rewriteKeyNames(ctx));
+			}
+			pending.push(schema);
+		}
+		json.additionalProperties = processSchema(def.valueType, ctx, {
+			...params,
+			path: [...params.path, "additionalProperties"]
+		});
+	}
+	const keyValues = keyType._zod.values;
+	const omittableOnInput = ctx.io === "input" && inputOptin(def.valueType) !== void 0;
+	if (keyValues && !def.partial && !omittableOnInput) {
+		const validKeyValues = [...keyValues].filter((v) => typeof v === "string" || typeof v === "number");
+		if (validKeyValues.length > 0) json.required = validKeyValues.map(String);
+	}
+};
 const nullableProcessor = (schema, ctx, json, params) => {
 	const def = schema._zod.def;
 	const inner = processSchema(def.innerType, ctx, params);
@@ -5264,6 +5499,28 @@ function tuple(items, _paramsOrRest, _params) {
 		...normalizeParams(hasRest ? _params : _paramsOrRest)
 	});
 }
+const ZodRecord = /*@__PURE__*/ $constructor("ZodRecord", (inst, def) => {
+	_ensureDefaultMemoizer();
+	$ZodRecord.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => recordProcessor(inst, ctx, json, params);
+	inst.keyType = def.keyType;
+	inst.valueType = def.valueType;
+});
+function record(keyType, valueType, params) {
+	if (!valueType || !valueType._zod) return new ZodRecord({
+		type: "record",
+		keyType: string(),
+		valueType: keyType,
+		...normalizeParams(valueType)
+	});
+	return new ZodRecord({
+		type: "record",
+		keyType,
+		valueType,
+		...normalizeParams(params)
+	});
+}
 const ZodEnum = /*@__PURE__*/ $constructor("ZodEnum", (inst, def) => {
 	$ZodEnum.init(inst, def);
 	ZodType.init(inst, def);
@@ -5992,7 +6249,7 @@ const AnimSpecSchema = object({
 	from: GradientSchema,
 	to: GradientSchema
 });
-object({
+const BlockStateSchema = object({
 	/** px размер блока */
 	w: number(),
 	h: number(),
@@ -6055,6 +6312,98 @@ function defaultLinearGradient(angle = 180, stops) {
 		}]
 	};
 }
+//#endregion
+//#region shared/assets.ts
+/**
+* Ассет-ссылки картинок стейта — экономия bandwidth Upstash (2026-10-13:
+* база ушла в suspend на 12 GB / 10 GB в месяц из-за мегабайтных dataURL,
+* гоняемых туда-обратно каждым полл-тиком и синком).
+*
+* В ХРАНИМОМ стейте (слот lab:s/<id> в KV, dev-кэш сервера) поля
+* compare.refImage / base.image / stage.image вместо dataURL несут строку
+* "asset:sha256-<hex>" (hex = sha256 от ТОЧНОЙ dataURL-строки, lowercase).
+* Сама dataURL лежит отдельным ключом lab:asset:sha256-<hex> (SETNX — каждая
+* уникальная картинка пишется один раз) и раздаётся GET /api/asset/<hash>.
+* Локальный стейт браузера всегда хранит dataURL (рендер/анализ/экспорт не
+* меняются) — трансляция только на границе транспорта.
+*
+* Модуль чистый: без zod/node/dom — используется клиентом, прод-функциями и
+* dev-сервером; хэширование и резолв инжектируются вызывающей стороной.
+*/
+/**
+* Префикс ссылки на ассет в полях-картинках стейта. Полный формат —
+* "asset:sha256-<hex>" (хэш-ключ с собственным префиксом 'sha256-').
+*/
+const ASSET_REF_PREFIX = "asset:";
+/** Ключ ассета: в assets-словаре тела sync/PUT и в пути /api/asset/<hash>. */
+const ASSET_HASH_RE = /^sha256-[0-9a-f]{64}$/;
+/** Поля-картинки BlockState (dot-пути), выносимые в ассеты. */
+const ASSET_IMAGE_FIELDS = [
+	{
+		top: "compare",
+		key: "refImage"
+	},
+	{
+		top: "base",
+		key: "image"
+	},
+	{
+		top: "stage",
+		key: "image"
+	}
+];
+/** dataURL-строка (поле-картинка с инлайн-содержимым)? */
+function isDataUrl(value) {
+	return typeof value === "string" && value.startsWith("data:");
+}
+function collectImages(state, pred) {
+	const record = state;
+	const out = [];
+	for (const f of ASSET_IMAGE_FIELDS) {
+		const owner = record[f.top];
+		if (owner === null || typeof owner !== "object") continue;
+		const v = owner[f.key];
+		if (pred(v)) out.push({
+			top: f.top,
+			key: f.key,
+			value: v
+		});
+	}
+	return out;
+}
+/**
+* Заменить dataURL-картинки на ассет-ссылки. toRef возвращает хэш-часть
+* ('sha256-<hex>') или null — хэш недоступен, поле остаётся инлайном (тогда
+* обе стороны сравнения тоже инлайн, байт-в-байт работает). Исходный объект
+* не мутируется (shallow-копии только затронутых веток). Одинаковые dataURL
+* в разных полях дедуплицируются в один ключ.
+*/
+async function extractAssetRefs(state, toRef) {
+	const found = collectImages(state, isDataUrl);
+	if (found.length === 0) return {
+		state,
+		assets: void 0
+	};
+	const refs = await Promise.all(found.map((f) => toRef(f.value)));
+	const next = { ...state };
+	const copies = /* @__PURE__ */ new Map();
+	for (const top of new Set(found.map((f) => f.top))) {
+		const copy = { ...next[top] };
+		copies.set(top, copy);
+		next[top] = copy;
+	}
+	const assets = {};
+	found.forEach((f, i) => {
+		const hash = refs[i];
+		if (hash === null) return;
+		copies.get(f.top)[f.key] = `${ASSET_REF_PREFIX}${hash}`;
+		assets[hash] = f.value;
+	});
+	return {
+		state: next,
+		assets: Object.keys(assets).length > 0 ? assets : void 0
+	};
+}
 /** Управляемый отказ (ловится wrapper'ом route в каждой функции). */
 var HttpError = class extends Error {
 	status;
@@ -6095,6 +6444,11 @@ async function readJsonBody(req) {
 		throw new HttpError(400, { error: "тело запроса не является JSON" });
 	}
 }
+union([object({
+	state: BlockStateSchema,
+	/** dataURL картинок по хэш-ключу (браузер прикладывает к транспортному виду стейта) */
+	assets: record(string().regex(ASSET_HASH_RE), string()).optional()
+}), BlockStateSchema]);
 /** Дефолтная сессия прода: заголовок X-Lab-Session не задан/пуст (см. API.md «Сессии»). */
 const DEFAULT_SESSION = "default";
 /** Допустимый id сессии: [a-zA-Z0-9_-], 1..64 символа. */
@@ -6129,9 +6483,12 @@ function requireMutationAuth(req) {
 * env KV_REST_API_URL/KV_REST_API_TOKEN проставляет интеграция Upstash
 * (Vercel → Storage → Marketplace). Без env все прод-функции отвечают 503.
 *
-* Команды: GET {url}/get|incr|del/<key>; SET — POST {url}/set/<key> с значением
-* в теле (документированный путь Upstash для больших значений: стейты с
-* dataURL-картинками бывают на мегабайты, URL-путь их не вместит).
+* Команды: GET {url}/get|incr|del|exists/<key>; SET — POST {url}/set/<key> с
+* значением в теле (документированный путь Upstash для больших значений).
+* Картинки-dataURL в слотах НЕ живут: при каждой записи слота выносятся в
+* ассет-ключи lab:asset:sha256-<hex> (см. lightenState), слот хранит только
+* ссылки asset:sha256-<hex> — мегабайты не гоняются полл-тиками и sync-ами
+* (инцидент bandwidth 12GB/10GB, 2026-10-13).
 */
 /** Ключи (см. API.md «Прод (Vercel)» и «Сессии»). */
 const K = {
@@ -6146,14 +6503,24 @@ const K = {
 	/** индекс имён пресетов (JSON-массив) — пресеты глобальны */
 	presetIndex: "lab:presets",
 	preset: (name) => `lab:preset:${name}`,
-	/** {version, state, analysisReq?, sweepReq?, notify?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
+	/**
+	* {version, state, analysisReq?, sweepReq?, notify?, name, updatedAt} —
+	* одним ключом, стейт только с asset-ссылками (слот лёгкий; полл-тик
+	* вообще не читает его на unchanged — см. K.statever)
+	*/
 	state: (id) => `lab:s/${id}`,
-	/** счётчик версий стейта слота (INCR при каждой записи) */
+	/**
+	* счётчик версий слота (INCR при каждой записи стейта И заявки/notify).
+	* Полл GET /api/state?since=N читает сначала ТОЛЬКО его (~16 байт) и не
+	* трогает слот, пока версия не свежее since — пустой тик стоит 1 команду.
+	*/
 	statever: (id) => `lab:s/${id}/ver`,
 	warnings: (id) => `lab:s/${id}/warnings`,
 	analysis: (id) => `lab:s/${id}/analysis`,
 	/** результат sweep по id (TTL не нужен — перетирается следующим заходом); id сессии в ключе, чтобы чужой sweep не читался */
-	sweep: (id, sweepId) => `lab:s/${id}/sweep/${sweepId}`
+	sweep: (id, sweepId) => `lab:s/${id}/sweep/${sweepId}`,
+	/** dataURL картинок стейта (контент-адресные, SETNX — переживают DELETE сессии: одинаковые кадры дедуплицируются между сессиями) */
+	asset: (hash) => `lab:asset:${hash}`
 };
 /** Вместимость индекса сессий: при переполнении выкидываем самые неактивные. */
 const SESSIONS_LIMIT = 50;
@@ -6220,8 +6587,54 @@ async function kvWriteJson(key, value) {
 		body: JSON.stringify(value)
 	});
 }
+/** INCR счётчика; возвращает новое значение. */
+async function kvIncr(key) {
+	const result = await kvRequest(`incr/${encodeURIComponent(key)}`);
+	const n = Number(result);
+	if (!Number.isInteger(n)) throw kvError(`incr ${key}: результат не целое число`);
+	return n;
+}
 async function kvDelete(key) {
 	await kvRequest(`del/${encodeURIComponent(key)}`);
+}
+/** Есть ли ключ (EXISTS — микро-ответ; GET тянул бы тело значения). */
+async function kvExists(key) {
+	const result = await kvRequest(`exists/${encodeURIComponent(key)}`);
+	return Number(result) > 0;
+}
+/** sha256 → hex lowercase (серверная сторона ассетов). */
+function sha256Hex(text) {
+	return createHash("sha256").update(text, "utf8").digest("hex");
+}
+/**
+* Записать dataURL в ассет-ключ lab:asset:sha256-<hex> с SETNX-семантикой:
+* сначала EXISTS, существующий НЕ перезаписываем (повторная загрузка того же
+* кадра не тратит bandwidth на перезапись мегабайт). Хэш сверяется с телом —
+* ключи контент-адресные, на этом держится дедуп и кэш браузера.
+*/
+async function putAsset(hash, dataUrl) {
+	if (!ASSET_HASH_RE.test(hash)) throw new HttpError(400, { error: `невалидный hash ассета: ожидается sha256-<64 hex>` });
+	if (!dataUrl.startsWith("data:")) throw new HttpError(400, { error: "ассет — dataURL-строка (data:image/...;base64,...)" });
+	const key = K.asset(hash);
+	if (await kvExists(key)) return;
+	if (sha256Hex(dataUrl) !== hash.slice(7)) throw new HttpError(400, { error: "hash ассета не совпадает с содержимым dataURL" });
+	await kvRequest(`set/${encodeURIComponent(key)}`, {
+		method: "POST",
+		body: dataUrl
+	});
+}
+/**
+* Вынести dataURL-картинки стейта в ассет-ключи: слот остаётся лёгким, каждая
+* уникальная картинка пишется в KV один раз (SETNX в putAsset). Ссылки
+* asset:sha256-* проходят насквозь; легаси-инлайн (слоты до деплоя) конвертится
+* первым же писателем — отдельной миграции не нужно. Ассеты пишутся ДО записи
+* слота, чтобы ссылка из слота всегда резолвилась.
+*/
+async function lightenState(state) {
+	if (state === null) return null;
+	const { state: light, assets } = await extractAssetRefs(state, (dataUrl) => Promise.resolve(`sha256-${sha256Hex(dataUrl)}`));
+	if (assets !== void 0) for (const [hash, dataUrl] of Object.entries(assets)) await putAsset(hash, dataUrl);
+	return light;
 }
 /** Прочитать индекс сессий (как есть, порядок — по updatedAt по возрастанию). */
 async function readIndex() {
@@ -6296,21 +6709,23 @@ async function ensureSession(id) {
 		updatedAt: Date.now()
 	};
 	await kvWriteJson(K.state(id), fresh);
+	await kvWriteJson(K.statever(id), 0);
 	await touchIndex(id, id);
 	return fresh;
 }
 /**
 * Положить сообщение агента юзеру в слот (POST /api/notify): одно последнее,
-* новое перезаписывает старое; версия не инкрементится — как у заявок, полл
-* забирает notify тем же тиком. Соседние analysisReq/sweepReq сохраняет.
+* новое перезаписывает старое; версия инкрементится — как у заявок, полл
+* забирает notify по сурпу версий. Соседние analysisReq/sweepReq сохраняет.
 * Возвращает ts сообщения (клиент фильтрует показ по нему).
 */
 async function setNotify(sessionId, text) {
 	const st = await ensureSession(sessionId);
+	const state = await lightenState(st.state);
 	const ts = Date.now();
 	const next = {
-		version: st.version,
-		state: st.state,
+		version: await kvIncr(K.statever(sessionId)),
+		state,
 		name: st.name,
 		updatedAt: ts,
 		notify: {

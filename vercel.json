@@ -35,6 +35,10 @@
         {
             "source": "/api/sweep/:id",
             "destination": "/api/sweep?id=:id"
+        },
+        {
+            "source": "/api/asset/:hash",
+            "destination": "/api/asset?hash=:hash"
         }
     ]
 }

@@ -1,5 +1,7 @@
+import { z } from 'zod';
 import { BlockStateSchema } from '../src/schema.ts';
 import type { BlockState } from '../src/schema.ts';
+import { ASSET_HASH_RE } from '../shared/assets.ts';
 
 /** Лимит тела запроса — как в dev-middleware. */
 export const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -59,6 +61,41 @@ export function parseStateBody(value: unknown): BlockState {
         throw new HttpError(400, { error: 'invalid BlockState', issues: parsed.error.issues });
     }
     return parsed.data;
+}
+
+/** Тело PUT /api/state и POST /api/sync: голый BlockState или {state, assets?}. */
+const StateWithAssetsSchema = z.union([
+    z.object({
+        state: BlockStateSchema,
+        /** dataURL картинок по хэш-ключу (браузер прикладывает к транспортному виду стейта) */
+        assets: z.record(z.string().regex(ASSET_HASH_RE), z.string()).optional(),
+    }),
+    BlockStateSchema,
+]);
+
+export interface StateWithAssets {
+    state: BlockState;
+    /** dataURL новых картинок; сервер кладёт их в ассет-ключи до записи слота */
+    assets?: Record<string, string>;
+}
+
+/**
+ * Разобрать тело со стейтом (формат PUT /api/state и POST /api/sync): голый
+ * BlockState — как всегда, {state, assets} — транспортный вид браузера
+ * (dataURL вынесены в словарь, в стейте — ссылки asset:sha256-*). 400 при
+ * невалидном.
+ */
+export function parseStateWithAssets(value: unknown): StateWithAssets {
+    const parsed = StateWithAssetsSchema.safeParse(value);
+    if (!parsed.success) {
+        throw new HttpError(400, { error: 'invalid BlockState', issues: parsed.error.issues });
+    }
+    if ('state' in parsed.data) {
+        return parsed.data.assets === undefined
+            ? { state: parsed.data.state }
+            : { state: parsed.data.state, assets: parsed.data.assets };
+    }
+    return { state: parsed.data };
 }
 
 /** Дефолтная сессия прода: заголовок X-Lab-Session не задан/пуст (см. API.md «Сессии»). */

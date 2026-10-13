@@ -5,6 +5,7 @@
  * Именованные GET/POST/PUT/DELETE — конвенция рантайма Vercel (Web-стиль).
  */
 import * as analysis from './analysis.ts';
+import * as asset from './asset.ts';
 import * as journal from './journal.ts';
 import * as methodology from './methodology.ts';
 import * as notify from './notify.ts';
@@ -42,6 +43,12 @@ export async function fetch(req: Request): Promise<Response> {
             return stateFns.PUT(req);
         case 'POST sync':
             return sync.POST(req);
+        case 'GET asset':
+            // ?hash= (прод-rewrite путь /api/asset/<hash> → query); хендлер
+            // понимает обе формы — см. hashFromRequest в asset.ts
+            return asset.GET(req);
+        case 'PUT asset':
+            return asset.PUT(req);
         case 'GET warnings':
             return warnings.GET(req);
         case 'POST warnings':

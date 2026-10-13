@@ -4,6 +4,7 @@
  * импортируются jiti как есть (TS, web-standard Request/Response). Контракт —
  * API.md. Запуск: npm test (tests/run.mjs).
  */
+import { createHash } from 'node:crypto';
 import { createJiti } from 'jiti';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -27,17 +28,21 @@ const req = (method, u, payload, headers = {}) =>
         ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     });
 
-// ── мок Upstash REST: get/set/incr/del через path, set — POST с телом ──
+// ── мок Upstash REST: get/set/incr/del/exists через path, set — POST с телом ──
 const kv = new Map();
 let fetchCount = 0;
+const reads = []; // ключи GET-команд — проверка «вер-тик не читает слот»
 globalThis.fetch = async (url, init = {}) => {
     fetchCount += 1;
-    const m = String(url).match(/https:\/\/mock\.upstash\.local\/(get|set|incr|del)\/(.+)$/);
+    const m = String(url).match(/https:\/\/mock\.upstash\.local\/(get|set|incr|del|exists)\/(.+)$/);
     if (m === null) throw new Error('неожиданный fetch: ' + url);
     const op = m[1];
     const key = decodeURIComponent(m[2]);
     const reply = (result) => ({ ok: true, status: 200, json: async () => ({ result }) });
-    if (op === 'get') return reply(kv.has(key) ? kv.get(key) : null);
+    if (op === 'get') {
+        reads.push(key);
+        return reply(kv.has(key) ? kv.get(key) : null);
+    }
     if (op === 'set') {
         kv.set(key, init.body);
         return reply('OK');
@@ -47,6 +52,7 @@ globalThis.fetch = async (url, init = {}) => {
         kv.set(key, String(n));
         return reply(n);
     }
+    if (op === 'exists') return reply(kv.has(key) ? 1 : 0);
     return reply(kv.delete(key) ? 1 : 0);
 };
 const KV_URL = 'https://mock.upstash.local';
@@ -71,6 +77,8 @@ const sweepIdApi = await jiti.import(`${ROOT}server/functions/sweep-id.ts`);
 const methodologyApi = await jiti.import(`${ROOT}server/functions/methodology.ts`);
 const sessionsApi = await jiti.import(`${ROOT}server/functions/sessions.ts`);
 const sessionsIdApi = await jiti.import(`${ROOT}server/functions/sessions-id.ts`);
+const assetApi = await jiti.import(`${ROOT}server/functions/asset.ts`);
+const notifyApi = await jiti.import(`${ROOT}server/functions/notify.ts`);
 const { METHODOLOGY } = await jiti.import(`${ROOT}src/lib/methodology.ts`);
 const { MethodologySchema, AnalysisSchema, defaultBlockState } = await jiti.import(
     `${ROOT}src/schema.ts`
@@ -181,6 +189,50 @@ const state = defaultBlockState();
             gotLegacy.json.blur.layers.length === 1 &&
             gotLegacy.json.blur.layers[0].radius === 10,
         JSON.stringify(gotLegacy.json.blur)
+    );
+}
+
+// ── гонка вер-тика с синком: заявки агента до синка едут в ответе синка ──
+{
+    const H = (id) => ({ 'X-Lab-Session': id });
+
+    // агент записал заявку анализа промахом target в версию N…
+    await stateApi.PUT(req('PUT', 'https://x/api/state', state, H('race')));
+    const miss = await body(
+        await analysisApi.GET(
+            req('GET', 'https://x/api/analysis?target=blurMask', undefined, H('race'))
+        )
+    );
+    check(
+        'гонка: промах analysis-target записал заявку (версия N)',
+        miss.status === 404 && labState('race').analysisReq === 'blurMask'
+    );
+    // …браузерный синк делает N+1: ver-тик полла (ver<=since) заявку уже не
+    // отдаст — ответ синка обязан нести её сам
+    const vRace = labState('race').version;
+    const s = await body(
+        await syncApi.POST(req('POST', 'https://x/api/sync', { state }, H('race')))
+    );
+    check(
+        'гонка: ответ sync несёт analysisRequest (заявка до синка)',
+        s.status === 200 && s.json.version === vRace + 1 && s.json.analysisRequest === 'blurMask'
+    );
+    check(
+        'гонка: sweepRequest/notify в ответе sync отсутствуют',
+        s.json.sweepRequest === undefined && s.json.notify === undefined
+    );
+    // чистый синк в сессии без заявок — только {ok, version}
+    const clean = await body(
+        await syncApi.POST(req('POST', 'https://x/api/sync', { state }, H('race-clean')))
+    );
+    check(
+        'чистый sync без заявок: полей заявок в ответе нет',
+        clean.status === 200 &&
+            clean.json.ok === true &&
+            clean.json.version === 1 &&
+            clean.json.analysisRequest === undefined &&
+            clean.json.sweepRequest === undefined &&
+            clean.json.notify === undefined
     );
 }
 
@@ -359,20 +411,22 @@ const analysis = AnalysisSchema.parse({
     await syncApi.POST(req('POST', 'https://x/api/sync', { state }));
     check('sync браузера не стёр sweepReq (версия выросла)', labState().sweepReq?.id === id);
 
-    // полл-тик = ровно 1 команда; заявки видны в changed и unchanged
+    // полл-тик без изменений = вер-тик: ТОЛЬКО микро-ключ lab:s/<id>/ver
+    // (1 команда, ~16 байт ответа), слот не читается. Заявки/notify
+    // инкрементят версию (см. блок ассетов ниже) — тик их замечает по ver
     const v = labVersion();
     const before2 = fetchCount;
+    reads.length = 0;
     const poll1 = await body(await stateApi.GET(req('GET', `https://x/api/state?since=${v}`)));
     check(
-        'полл: ровно 1 команда Upstash',
+        'полл unchanged: ровно 1 команда (get /ver)',
         fetchCount - before2 === 1,
         `команд: ${fetchCount - before2}`
     );
+    check('полл unchanged: слот НЕ читался', !reads.includes('lab:s/default'));
     check(
-        'полл unchanged: несёт sweepRequest + analysisRequest(уже стёрт маркером)',
-        poll1.json.unchanged === true &&
-            poll1.json.sweepRequest?.id === id &&
-            poll1.json.analysisRequest === undefined
+        'полл unchanged: {version, unchanged:true} без тела слота',
+        poll1.json.unchanged === true && poll1.json.version === v && poll1.json.state === undefined
     );
     const poll2 = await body(await stateApi.GET(req('GET', `https://x/api/state?since=${v - 1}`)));
     check(
@@ -480,6 +534,158 @@ const analysis = AnalysisSchema.parse({
     check(
         'GET /<id> битый id: 400',
         (await body(await sweepIdApi.GET(req('GET', 'https://x/api/sweep?id=%zz')))).status === 400
+    );
+}
+
+// ── ассеты картинок: лёгкий слот, roundtrip, SETNX-дедуп, заявки/notify, легаси ──
+const sha = (t) => createHash('sha256').update(t, 'utf8').digest('hex');
+const PNG_A =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const PNG_B =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+const HASH_A = `sha256-${sha(PNG_A)}`;
+const HASH_B = `sha256-${sha(PNG_B)}`;
+{
+    const H = (id) => ({ 'X-Lab-Session': id });
+
+    // агентский PUT с инлайн-dataURL: сервер выносит картинки — слот лёгкий
+    const withImgs = {
+        ...state,
+        base: { ...state.base, kind: 'image', image: PNG_A },
+        compare: { ...state.compare, refImage: PNG_A },
+        stage: { ...state.stage, image: PNG_B },
+    };
+    const put = await body(
+        await stateApi.PUT(req('PUT', 'https://x/api/state', withImgs, H('img')))
+    );
+    check('ассеты: PUT с инлайн-картинками — 200', put.status === 200);
+    const slot = labState('img');
+    check(
+        'ассеты: слот хранит asset-ссылки (refImage/base.image/stage.image)',
+        slot.state.compare.refImage === `asset:${HASH_A}` &&
+            slot.state.base.image === `asset:${HASH_A}` &&
+            slot.state.stage.image === `asset:${HASH_B}`
+    );
+    check(
+        'ассеты: дедуп — одинаковый кадр в двух полях → один ключ, каждый в KV',
+        kv.has(`lab:asset:${HASH_A}`) && kv.has(`lab:asset:${HASH_B}`)
+    );
+    const got = await body(
+        await stateApi.GET(req('GET', 'https://x/api/state', undefined, H('img')))
+    );
+    check(
+        'ассеты: GET /api/state отдаёт ссылки как есть',
+        got.status === 200 && got.json.compare.refImage === `asset:${HASH_A}`
+    );
+
+    // /api/asset: обе формы (query — прод-rewrite из path, path — напрямую)
+    const a1 = await body(await assetApi.GET(req('GET', `https://x/api/asset?hash=${HASH_A}`)));
+    check('GET /api/asset?hash=: {dataURL}', a1.status === 200 && a1.json.dataURL === PNG_A);
+    const a2 = await body(await assetApi.GET(req('GET', `https://x/api/asset/${HASH_B}`)));
+    check('GET /api/asset/<hash> (path-форма): {dataURL}', a2.status === 200 && a2.json.dataURL === PNG_B);
+    const a404 = await body(
+        await assetApi.GET(req('GET', `https://x/api/asset/sha256-${sha('data:image/png;base64,NOPE')}`))
+    );
+    check('GET /api/asset несуществующего: 404', a404.status === 404);
+    const aBad = await body(await assetApi.GET(req('GET', 'https://x/api/asset?hash=sha256-XX')));
+    check('GET /api/asset битый hash: 400', aBad.status === 400);
+
+    // PUT /api/asset: SETNX-дедуп (существующий не перезаписывается)
+    kv.set(`lab:asset:${HASH_A}`, 'SENTINEL');
+    const putA = await body(
+        await assetApi.PUT(new Request(`https://x/api/asset?hash=${HASH_A}`, { method: 'PUT', body: PNG_A }))
+    );
+    check('PUT asset существующего: 200 (SETNX-скип)', putA.status === 200 && putA.json.ok === true);
+    check('SETNX-дедуп: существующий ассет НЕ перезаписан', kv.get(`lab:asset:${HASH_A}`) === 'SENTINEL');
+    kv.set(`lab:asset:${HASH_A}`, PNG_A); // вернуть настоящий кадр для roundtrip ниже
+
+    // PUT /api/asset: валидации нового ассета
+    const freshHash = `sha256-${sha(PNG_B + '-другой-кадр')}`;
+    const mismatch = await body(
+        await assetApi.PUT(new Request(`https://x/api/asset?hash=${freshHash}`, { method: 'PUT', body: PNG_B }))
+    );
+    check('PUT asset: хэш не сходится с телом — 400', mismatch.status === 400);
+    const notData = await body(
+        await assetApi.PUT(
+            new Request(`https://x/api/asset?hash=sha256-${sha('zzz')}`, { method: 'PUT', body: 'zzz' })
+        )
+    );
+    check('PUT asset: не dataURL — 400', notData.status === 400);
+    const badHash = await body(
+        await assetApi.PUT(new Request('https://x/api/asset?hash=abc', { method: 'PUT', body: PNG_A }))
+    );
+    check('PUT asset: битый hash — 400', badHash.status === 400);
+
+    // sync в транспортном виде {state, assets} (путь браузера)
+    const PNG_C = 'data:image/png;base64,QkFTRTY0X0M=';
+    const HASH_C = `sha256-${sha(PNG_C)}`;
+    const syncRes = await body(
+        await syncApi.POST(
+            req(
+                'POST',
+                'https://x/api/sync',
+                {
+                    state: { ...state, compare: { ...state.compare, refImage: `asset:${HASH_C}` } },
+                    assets: { [HASH_C]: PNG_C },
+                },
+                H('img')
+            )
+        )
+    );
+    check('sync {state, assets}: 200', syncRes.status === 200);
+    check(
+        'sync: ассет из словаря в KV, ссылка в стейте прошла насквозь',
+        kv.get(`lab:asset:${HASH_C}`) === PNG_C &&
+            labState('img').state.compare.refImage === `asset:${HASH_C}`
+    );
+
+    // заявки/notify инкрементируют версию — вер-тик полла их замечает
+    const vNotify = labState('img').version;
+    await notifyApi.POST(req('POST', 'https://x/api/notify', { text: 'кадры на месте' }, H('img')));
+    check(
+        'notify инкрементит версию',
+        labState('img').version === vNotify + 1,
+        `${vNotify} → ${labState('img').version}`
+    );
+    const tickNotify = await body(
+        await stateApi.GET(req('GET', `https://x/api/state?since=${vNotify}`, undefined, H('img')))
+    );
+    check(
+        'полл после notify: сообщение доставлено (слот прочитан по сурпу ver)',
+        tickNotify.json.notify?.text === 'кадры на месте' &&
+            tickNotify.json.unchanged !== true &&
+            tickNotify.json.state !== null
+    );
+    const tickSeen = await body(
+        await stateApi.GET(req('GET', `https://x/api/state?since=${vNotify + 1}`, undefined, H('img')))
+    );
+    check('полл на свежей версии: снова unchanged (1 команда)', tickSeen.json.unchanged === true);
+
+    const vSweep = labState('img').version;
+    await sweepApi.POST(
+        req('POST', 'https://x/api/sweep', { field: 'blur.radius', from: 1, to: 3, steps: 2 }, H('img'))
+    );
+    const tickSweep = await body(
+        await stateApi.GET(req('GET', `https://x/api/state?since=${vSweep}`, undefined, H('img')))
+    );
+    check(
+        'sweep-заявка: версия инкрементнулась, полл доставляет заявку',
+        labState('img').version === vSweep + 1 && tickSweep.json.sweepRequest?.req.field === 'blur.radius'
+    );
+
+    // легаси-слот без микро-ключа /ver (слоты до деплоя): читается целиком
+    kv.delete('lab:s/img/ver');
+    reads.length = 0;
+    const legacyTick = await body(
+        await stateApi.GET(
+            req('GET', `https://x/api/state?since=${labState('img').version}`, undefined, H('img'))
+        )
+    );
+    check(
+        'легаси-слот без /ver: читается целиком (fallback без вер-тика)',
+        reads.includes('lab:s/img') &&
+            legacyTick.json.unchanged === true &&
+            legacyTick.json.notify?.text === 'кадры на месте'
     );
 }
 

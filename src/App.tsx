@@ -6,7 +6,15 @@ import { Inspector } from './components/Inspector';
 import { PresetDrawer } from './components/PresetDrawer';
 import { Stage } from './components/Stage';
 import { UndoIcon } from './components/icons';
-import { agentPost, agentSync, pollState } from './lib/agentTransport';
+import {
+    agentPost,
+    agentSync,
+    normalizedStateJson,
+    pollState,
+    prepareStateUpload,
+    resolveStateImages,
+    type AgentPending,
+} from './lib/agentTransport';
 import { computeAnalysis } from './lib/analysis';
 import { pollDelayMs } from './lib/backoff';
 import { computeHint } from './lib/hint';
@@ -19,6 +27,7 @@ import { validateStart } from './lib/validate';
 import { BlockStateSchema, SweepReqSchema, defaultBlockState } from './schema';
 import { readGradient, targetFromString, targetToKey } from './targets';
 import { sameTarget, useLabStore } from './store';
+import { hasAssetRefs } from '../shared/assets';
 import type { Analysis, BlockState, GradientTarget, SweepPoint, SweepRequest } from './types';
 
 /** Вставка картинки из буфера (Ctrl+V) как референса сравнения. */
@@ -69,8 +78,8 @@ function usePasteImage() {
  * агентского PUT, юзерские правки поверх — обычный last-writer-wins. dev
  * всегда однопользовательский: сессии нет ('default').
  *
- * прод: вместо SSE — поллинг версий GET /api/state?since=N раз в ~10с (пауза
- * при document.hidden; бэкофф до 60с при квоте/сбоях Upstash — lib/backoff).
+ * прод: вместо SSE — поллинг версий GET /api/state?since=N раз в ~30с (пауза
+ * при document.hidden; бэкофф до 150с при квоте/сбоях Upstash — lib/backoff).
  * Эхо закрыто по версиям: свой POST /api/sync запоминает присвоенную сервером
  * версию и поллинг её не возвращает (unchanged), чужую версию применяем и не
  * отсылаем обратно (identity-чек, как в dev); потерянный ответ синка страховён
@@ -112,30 +121,72 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             // подряд неудачные тики (429/502/5xx от квоты Upstash, сеть) — бэкофф
             let failures = 0;
 
+            /**
+             * Заявки агента и notify — единая обработка для полл-тика и ответа
+             * синка: analysisRequest → таргет анализа, sweepRequest → заявка
+             * на авто-перебор, notify → тост с гейтом по lastSeenNotifyTs.
+             * В sync-ветке это НЕ тик: failures/firstPoll/arm не трогаются.
+             */
+            const applyPending = (p: AgentPending): void => {
+                if (p.analysisRequest !== undefined) {
+                    // агент ждёт анализ таргета (GET /api/analysis?target=...):
+                    // вместо SSE-события заявка приезжает поллингом стейта
+                    const t = targetFromString(p.analysisRequest);
+                    if (t !== null) setAnalysisTarget(t);
+                }
+                if (p.sweepRequest !== undefined) {
+                    // заявка на авто-перебор (POST /api/sweep): исполняет
+                    // useSweepSync; повторные доставки того же id — no-op в сторе
+                    useLabStore.getState().requestSweep(p.sweepRequest);
+                }
+                if (p.notify !== undefined && p.notify.ts > lastSeenNotifyTs) {
+                    // сообщение агента (POST /api/notify): тост тем же механизмом
+                    // agentNote (префикс «Агент:»); повторные доставки того же
+                    // ts молча пропускаются
+                    lastSeenNotifyTs = p.notify.ts;
+                    window.clearTimeout(showTimer);
+                    window.clearTimeout(hideTimer);
+                    setAgentNote(`Агент: ${p.notify.text}`);
+                    hideTimer = window.setTimeout(() => setAgentNote(null), 4000);
+                }
+            };
+
             const send = (): void => {
-                const state = useLabStore.getState().state;
-                const json = JSON.stringify(state);
-                // контент не менялся (sweep восстановил исходное) — не шлём
-                if (json === lastSyncJson) return;
-                lastSyncJson = json;
-                void agentSync(state).then((version) => {
-                    if (version === null) {
-                        // не дошло — эхо-чек по этой строке не валиден
-                        lastSyncJson = '';
-                        return;
-                    }
-                    if (version > lastKnownVersion) lastKnownVersion = version;
+                // транспортный вид: dataURL → asset-ссылки (слот в KV лёгкий;
+                // KV-запись ассета происходит один раз (SETNX), payload синка
+                // несёт dataURL каждый раз — квоту Upstash это не тратит
+                // (EXISTS-микроответ), только Vercel-трафик)
+                void prepareStateUpload(useLabStore.getState().state).then((payload) => {
+                    const json = JSON.stringify(payload.state);
+                    // контент не менялся (sweep восстановил исходное) — не шлём
+                    if (json === lastSyncJson) return;
+                    lastSyncJson = json;
+                    void agentSync(payload).then((reply) => {
+                        if (reply === null) {
+                            // не дошло — эхо-чек по этой строке не валиден
+                            lastSyncJson = '';
+                            return;
+                        }
+                        if (reply.version > lastKnownVersion) lastKnownVersion = reply.version;
+                        // заявки агента, записанные ДО синка (гонка «заявка в
+                        // N, синк делает N+1» — вер-тик их уже не отдаст),
+                        // обрабатываем тем же кодом, что и полл-тик
+                        applyPending(reply);
+                    });
                 });
             };
 
-            const applyForeign = (state: unknown, version: number): void => {
-                // своё, вернувшееся с сервера (ответ синка потерян после записи
-                // или правка ещё в debounce): контент не трогаем — иначе replace
+            const applyForeign = async (incoming: unknown, version: number): Promise<void> => {
+                // сверка в нормализованном refs-виде: пришедший стейт несёт
+                // asset-ссылки, локальный — dataURL; прямое сравнение давало бы
+                // ложное «изменилось» каждый тик (lib/agentTransport). Своё,
+                // вернувшееся с сервера (ответ синка потерян после записи или
+                // правка ещё в debounce): контент не трогаем — иначе replace
                 // откатил бы несинкнутую юзерскую правку; применяется только версия
-                const pollJson = JSON.stringify(state);
+                const incomingJson = await normalizedStateJson(incoming);
                 if (
-                    pollJson === lastSyncJson ||
-                    pollJson === JSON.stringify(useLabStore.getState().state)
+                    incomingJson === lastSyncJson ||
+                    incomingJson === (await normalizedStateJson(useLabStore.getState().state))
                 ) {
                     return;
                 }
@@ -146,18 +197,22 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                 // в API.md: до done/aborted не PUT-ить, GET в это время честен —
                 // транзиенты на сервер не уходят, см. shouldSendSync)
                 if (useLabStore.getState().sweeping) return;
-                const parsed = BlockStateSchema.safeParse(state);
+                const parsed = BlockStateSchema.safeParse(incoming);
                 if (!parsed.success) return;
+                // asset-ссылки → dataURL (кэш в imageCache; несрезолвленная —
+                // поле пустое, рендер живёт как без картинки)
+                const resolved = await resolveStateImages(parsed.data);
+                if (useLabStore.getState().sweeping) return;
                 // ссылка применяемого объекта: подписка по ней не шлёт /api/sync
-                justAppliedRef.current = parsed.data;
+                justAppliedRef.current = resolved;
                 lastKnownVersion = version;
                 const prevState = useLabStore.getState().state;
-                replace(parsed.data, { undoable: false });
+                replace(resolved, { undoable: false });
                 // индикация агентской активности: пачка PUT-ов агрегируется —
                 // тост показывается через 1с затишья и гаснет через 2.5с,
                 // иначе при активном агенте он «висит» постоянно
                 const paths: string[] = [];
-                diffPaths(prevState, parsed.data, '', 0, paths);
+                diffPaths(prevState, resolved, '', 0, paths);
                 if (paths.length > 0) {
                     burstPaths = [...new Set([...burstPaths, ...paths])].slice(-8);
                     window.clearTimeout(showTimer);
@@ -201,27 +256,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                     return;
                 }
                 failures = 0; // живой ответ (в т.ч. 404 «стейта ещё нет») — сброс бэкоффа
-                if (res.analysisRequest !== undefined) {
-                    // агент ждёт анализ таргета (GET /api/analysis?target=...):
-                    // вместо SSE-события заявка приезжает поллингом стейта
-                    const t = targetFromString(res.analysisRequest);
-                    if (t !== null) setAnalysisTarget(t);
-                }
-                if (res.sweepRequest !== undefined) {
-                    // заявка на авто-перебор (POST /api/sweep): исполняет
-                    // useSweepSync; повторные доставки того же id — no-op в сторе
-                    useLabStore.getState().requestSweep(res.sweepRequest);
-                }
-                if (res.notify !== undefined && res.notify.ts > lastSeenNotifyTs) {
-                    // сообщение агента (POST /api/notify): тост тем же механизмом
-                    // agentNote (префикс «Агент:»); повторные доставки того же
-                    // ts молча пропускаются
-                    lastSeenNotifyTs = res.notify.ts;
-                    window.clearTimeout(showTimer);
-                    window.clearTimeout(hideTimer);
-                    setAgentNote(`Агент: ${res.notify.text}`);
-                    hideTimer = window.setTimeout(() => setAgentNote(null), 4000);
-                }
+                applyPending(res);
                 if (res.version !== undefined && res.version > lastKnownVersion) {
                     if (res.state !== undefined && !res.unchanged) {
                         if (firstPoll && hashLoadedRef.current) {
@@ -229,7 +264,9 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                             // версию adopting, чтобы поллинг не привозил её снова
                             hashLoadedRef.current = false;
                         } else {
-                            applyForeign(res.state, res.version);
+                            // applyForeign резолвит asset-ссылки — асинхронно;
+                            // двойной await в poll сохраняет порядок применения
+                            await applyForeign(res.state, res.version);
                         }
                         firstPoll = false;
                     }
@@ -276,16 +313,19 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             if (s.state === justAppliedRef.current) return;
             window.clearTimeout(timer);
             timer = window.setTimeout(() => {
-                const json = JSON.stringify(useLabStore.getState().state);
-                // контент не менялся (sweep восстановил исходное) — не шлём
-                if (json === lastSyncJson) return;
-                lastSyncJson = json;
-                fetch('/api/__sync', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: json,
-                }).catch(() => {
-                    // dev-сервер недоступен/перезапущен — просто пропускаем тик
+                // тот же транспортный вид, что на проде: dev-кэш сервера хранит
+                // asset-ссылки, картинки — в его asset-мапе (единый контракт)
+                void prepareStateUpload(useLabStore.getState().state).then((payload) => {
+                    const json = JSON.stringify(payload.state);
+                    // контент не менялся (sweep восстановил исходное) — не шлём
+                    if (json === lastSyncJson) return;
+                    lastSyncJson = json;
+                    fetch('/api/__sync', {
+                        method: 'POST',
+                        body: JSON.stringify(payload),
+                    }).catch(() => {
+                        // dev-сервер недоступен/перезапущен — просто пропускаем тик
+                    });
                 });
             }, 300);
         });
@@ -365,6 +405,17 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                 if (JSON.stringify(msg.state) === lastSyncJson) return;
                 const parsed = BlockStateSchema.safeParse(msg.state);
                 if (!parsed.success) return;
+                if (hasAssetRefs(parsed.data)) {
+                    // стейт с asset-ссылками (refs-кэш сервера/агентский PUT) —
+                    // резолвим в dataURL и применяем; локальный стор всегда
+                    // хранит dataURL, рендер/анализ не меняются
+                    void resolveStateImages(parsed.data).then((resolved) => {
+                        if (useLabStore.getState().sweeping) return;
+                        justAppliedRef.current = resolved;
+                        replace(resolved, { undoable: false });
+                    });
+                    return;
+                }
                 // ссылка применяемого объекта: subscribe-хук по ней не шлёт /api/__sync
                 justAppliedRef.current = parsed.data;
                 replace(parsed.data, { undoable: false });

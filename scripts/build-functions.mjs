@@ -41,8 +41,10 @@ for (const fn of FUNCTIONS) {
         const { output } = await build.generate({ format: 'esm' });
         const chunks = output.filter((c) => c.type === 'chunk');
         const code = chunks[0]?.code ?? '';
-        // самодостаточность: один чанк и ни одного внешнего импорта
-        const external = chunks[0]?.imports ?? [];
+        // самодостаточность: один чанк; внешние импорты — только node:-builtin'ы
+        // (их код инлайнить нечего, рантайм Vercel Node резолвит сам; прочие
+        // внешние импорты — ERR_MODULE_NOT_FOUND, см. урок в шапке)
+        const external = (chunks[0]?.imports ?? []).filter((id) => !id.startsWith('node:'));
         if (chunks.length !== 1 || external.length > 0 || code === '') {
             throw new Error(
                 `${fn.in}: ожидался 1 самодостаточный чанк, получил ${chunks.length} чанк(ов), внешние импорты: [${external.join(', ')}]`

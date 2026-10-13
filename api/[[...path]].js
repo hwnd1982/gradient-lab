@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 //#region node_modules/zod/v4/core/util.js
 function getEnumValues(entries) {
 	const numericValues = Object.values(entries).filter((v) => typeof v === "number");
@@ -2502,6 +2503,138 @@ function handleTupleResults(itemResults, final, items, input, optoutStart) {
 	else break;
 	return final;
 }
+const $ZodRecord = /*@__PURE__*/ $constructor("$ZodRecord", (inst, def) => {
+	$ZodType.init(inst, def);
+	const memo = globalConfig.memoizer;
+	memo?.attach(inst);
+	inst._zod.parse = (payload, ctx) => {
+		const input = payload.value;
+		if (!isPlainObject(input)) {
+			payload.issues.push({
+				expected: "record",
+				code: "invalid_type",
+				input,
+				inst
+			});
+			return payload;
+		}
+		const proms = [];
+		const values = def.keyType._zod.values;
+		if (values && !def.partial) {
+			payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
+			const recordKeys = /* @__PURE__ */ new Set();
+			for (const key of values) if (typeof key === "string" || typeof key === "number" || typeof key === "symbol") {
+				recordKeys.add(typeof key === "number" ? key.toString() : key);
+				if (key === "__proto__") continue;
+				const keyResult = def.keyType._zod.run({
+					value: key,
+					issues: []
+				}, ctx);
+				if (keyResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+				if (keyResult.issues.length) {
+					payload.issues.push({
+						code: "invalid_key",
+						origin: "record",
+						issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+						input: key,
+						path: [key],
+						inst
+					});
+					continue;
+				}
+				const outKey = keyResult.value;
+				if (outKey === "__proto__") continue;
+				const result = def.valueType._zod.run({
+					value: input[key],
+					issues: []
+				}, ctx);
+				if (result instanceof Promise) proms.push(result.then((result) => {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}));
+				else {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}
+			}
+			let unrecognized;
+			for (const key in input) if (!recordKeys.has(key)) {
+				if (def.mode === "loose") {
+					if (key === "__proto__") continue;
+					payload.value[key] = input[key];
+				} else {
+					unrecognized = unrecognized ?? [];
+					unrecognized.push(key);
+				}
+			}
+			if (unrecognized && unrecognized.length > 0) payload.issues.push({
+				code: "unrecognized_keys",
+				input,
+				inst,
+				keys: unrecognized,
+				continue: true
+			});
+		} else {
+			payload.value = memo ? memo.alloc(inst, payload, {}, ctx) : {};
+			let unrecognized;
+			for (const key of Reflect.ownKeys(input)) {
+				if (key === "__proto__") continue;
+				if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
+				let keyResult = def.keyType._zod.run({
+					value: key,
+					issues: []
+				}, ctx);
+				if (keyResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+				if (typeof key === "string" && number$1.test(key) && keyResult.issues.length) {
+					const retryResult = def.keyType._zod.run({
+						value: Number(key),
+						issues: []
+					}, ctx);
+					if (retryResult instanceof Promise) throw new Error("Async schemas not supported in object keys currently");
+					if (retryResult.issues.length === 0) keyResult = retryResult;
+				}
+				if (keyResult.issues.length) {
+					if (def.mode === "loose") payload.value[key] = input[key];
+					else if (values) {
+						unrecognized = unrecognized ?? [];
+						unrecognized.push(key);
+					} else payload.issues.push({
+						code: "invalid_key",
+						origin: "record",
+						issues: keyResult.issues.map((iss) => finalizeIssue(iss, ctx, config())),
+						input: key,
+						path: [key],
+						inst
+					});
+					continue;
+				}
+				const outKey = keyResult.value;
+				if (outKey === "__proto__") continue;
+				const result = def.valueType._zod.run({
+					value: input[key],
+					issues: []
+				}, ctx);
+				if (result instanceof Promise) proms.push(result.then((result) => {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}));
+				else {
+					if (result.issues.length) payload.issues.push(...prefixIssues(key, result.issues));
+					payload.value[outKey] = result.value;
+				}
+			}
+			if (unrecognized && unrecognized.length > 0) payload.issues.push({
+				code: "unrecognized_keys",
+				input,
+				inst,
+				keys: unrecognized,
+				continue: true
+			});
+		}
+		if (proms.length) return Promise.all(proms).then(() => payload);
+		return payload;
+	};
+});
 const $ZodEnum = /*@__PURE__*/ $constructor("$ZodEnum", (inst, def) => {
 	$ZodType.init(inst, def);
 	const values = getEnumValues(def.entries);
@@ -5512,6 +5645,28 @@ function tuple(items, _paramsOrRest, _params) {
 		...normalizeParams(hasRest ? _params : _paramsOrRest)
 	});
 }
+const ZodRecord = /*@__PURE__*/ $constructor("ZodRecord", (inst, def) => {
+	_ensureDefaultMemoizer();
+	$ZodRecord.init(inst, def);
+	ZodType.init(inst, def);
+	inst._zod.processJSONSchema = (ctx, json, params) => recordProcessor(inst, ctx, json, params);
+	inst.keyType = def.keyType;
+	inst.valueType = def.valueType;
+});
+function record(keyType, valueType, params) {
+	if (!valueType || !valueType._zod) return new ZodRecord({
+		type: "record",
+		keyType: string(),
+		valueType: keyType,
+		...normalizeParams(valueType)
+	});
+	return new ZodRecord({
+		type: "record",
+		keyType,
+		valueType,
+		...normalizeParams(params)
+	});
+}
 const ZodEnum = /*@__PURE__*/ $constructor("ZodEnum", (inst, def) => {
 	$ZodEnum.init(inst, def);
 	ZodType.init(inst, def);
@@ -6370,6 +6525,98 @@ function sanitizeName(raw) {
 	}
 	return decoded.replace(/\.json$/i, "").replace(/[^a-zA-Z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
 }
+//#endregion
+//#region shared/assets.ts
+/**
+* Ассет-ссылки картинок стейта — экономия bandwidth Upstash (2026-10-13:
+* база ушла в suspend на 12 GB / 10 GB в месяц из-за мегабайтных dataURL,
+* гоняемых туда-обратно каждым полл-тиком и синком).
+*
+* В ХРАНИМОМ стейте (слот lab:s/<id> в KV, dev-кэш сервера) поля
+* compare.refImage / base.image / stage.image вместо dataURL несут строку
+* "asset:sha256-<hex>" (hex = sha256 от ТОЧНОЙ dataURL-строки, lowercase).
+* Сама dataURL лежит отдельным ключом lab:asset:sha256-<hex> (SETNX — каждая
+* уникальная картинка пишется один раз) и раздаётся GET /api/asset/<hash>.
+* Локальный стейт браузера всегда хранит dataURL (рендер/анализ/экспорт не
+* меняются) — трансляция только на границе транспорта.
+*
+* Модуль чистый: без zod/node/dom — используется клиентом, прод-функциями и
+* dev-сервером; хэширование и резолв инжектируются вызывающей стороной.
+*/
+/**
+* Префикс ссылки на ассет в полях-картинках стейта. Полный формат —
+* "asset:sha256-<hex>" (хэш-ключ с собственным префиксом 'sha256-').
+*/
+const ASSET_REF_PREFIX = "asset:";
+/** Ключ ассета: в assets-словаре тела sync/PUT и в пути /api/asset/<hash>. */
+const ASSET_HASH_RE = /^sha256-[0-9a-f]{64}$/;
+/** Поля-картинки BlockState (dot-пути), выносимые в ассеты. */
+const ASSET_IMAGE_FIELDS = [
+	{
+		top: "compare",
+		key: "refImage"
+	},
+	{
+		top: "base",
+		key: "image"
+	},
+	{
+		top: "stage",
+		key: "image"
+	}
+];
+/** dataURL-строка (поле-картинка с инлайн-содержимым)? */
+function isDataUrl(value) {
+	return typeof value === "string" && value.startsWith("data:");
+}
+function collectImages(state, pred) {
+	const record = state;
+	const out = [];
+	for (const f of ASSET_IMAGE_FIELDS) {
+		const owner = record[f.top];
+		if (owner === null || typeof owner !== "object") continue;
+		const v = owner[f.key];
+		if (pred(v)) out.push({
+			top: f.top,
+			key: f.key,
+			value: v
+		});
+	}
+	return out;
+}
+/**
+* Заменить dataURL-картинки на ассет-ссылки. toRef возвращает хэш-часть
+* ('sha256-<hex>') или null — хэш недоступен, поле остаётся инлайном (тогда
+* обе стороны сравнения тоже инлайн, байт-в-байт работает). Исходный объект
+* не мутируется (shallow-копии только затронутых веток). Одинаковые dataURL
+* в разных полях дедуплицируются в один ключ.
+*/
+async function extractAssetRefs(state, toRef) {
+	const found = collectImages(state, isDataUrl);
+	if (found.length === 0) return {
+		state,
+		assets: void 0
+	};
+	const refs = await Promise.all(found.map((f) => toRef(f.value)));
+	const next = { ...state };
+	const copies = /* @__PURE__ */ new Map();
+	for (const top of new Set(found.map((f) => f.top))) {
+		const copy = { ...next[top] };
+		copies.set(top, copy);
+		next[top] = copy;
+	}
+	const assets = {};
+	found.forEach((f, i) => {
+		const hash = refs[i];
+		if (hash === null) return;
+		copies.get(f.top)[f.key] = `${ASSET_REF_PREFIX}${hash}`;
+		assets[hash] = f.value;
+	});
+	return {
+		state: next,
+		assets: Object.keys(assets).length > 0 ? assets : void 0
+	};
+}
 /** Управляемый отказ (ловится wrapper'ом route в каждой функции). */
 var HttpError = class extends Error {
 	status;
@@ -6419,6 +6666,30 @@ function parseStateBody(value) {
 	});
 	return parsed.data;
 }
+/** Тело PUT /api/state и POST /api/sync: голый BlockState или {state, assets?}. */
+const StateWithAssetsSchema = union([object({
+	state: BlockStateSchema,
+	/** dataURL картинок по хэш-ключу (браузер прикладывает к транспортному виду стейта) */
+	assets: record(string().regex(ASSET_HASH_RE), string()).optional()
+}), BlockStateSchema]);
+/**
+* Разобрать тело со стейтом (формат PUT /api/state и POST /api/sync): голый
+* BlockState — как всегда, {state, assets} — транспортный вид браузера
+* (dataURL вынесены в словарь, в стейте — ссылки asset:sha256-*). 400 при
+* невалидном.
+*/
+function parseStateWithAssets(value) {
+	const parsed = StateWithAssetsSchema.safeParse(value);
+	if (!parsed.success) throw new HttpError(400, {
+		error: "invalid BlockState",
+		issues: parsed.error.issues
+	});
+	if ("state" in parsed.data) return parsed.data.assets === void 0 ? { state: parsed.data.state } : {
+		state: parsed.data.state,
+		assets: parsed.data.assets
+	};
+	return { state: parsed.data };
+}
 /** Дефолтная сессия прода: заголовок X-Lab-Session не задан/пуст (см. API.md «Сессии»). */
 const DEFAULT_SESSION = "default";
 /** Допустимый id сессии: [a-zA-Z0-9_-], 1..64 символа. */
@@ -6455,9 +6726,12 @@ function requireMutationAuth(req) {
 * env KV_REST_API_URL/KV_REST_API_TOKEN проставляет интеграция Upstash
 * (Vercel → Storage → Marketplace). Без env все прод-функции отвечают 503.
 *
-* Команды: GET {url}/get|incr|del/<key>; SET — POST {url}/set/<key> с значением
-* в теле (документированный путь Upstash для больших значений: стейты с
-* dataURL-картинками бывают на мегабайты, URL-путь их не вместит).
+* Команды: GET {url}/get|incr|del|exists/<key>; SET — POST {url}/set/<key> с
+* значением в теле (документированный путь Upstash для больших значений).
+* Картинки-dataURL в слотах НЕ живут: при каждой записи слота выносятся в
+* ассет-ключи lab:asset:sha256-<hex> (см. lightenState), слот хранит только
+* ссылки asset:sha256-<hex> — мегабайты не гоняются полл-тиками и sync-ами
+* (инцидент bandwidth 12GB/10GB, 2026-10-13).
 */
 /** Ключи (см. API.md «Прод (Vercel)» и «Сессии»). */
 const K = {
@@ -6472,14 +6746,24 @@ const K = {
 	/** индекс имён пресетов (JSON-массив) — пресеты глобальны */
 	presetIndex: "lab:presets",
 	preset: (name) => `lab:preset:${name}`,
-	/** {version, state, analysisReq?, sweepReq?, notify?, name, updatedAt} — одним ключом: полл-тик = 1 команда */
+	/**
+	* {version, state, analysisReq?, sweepReq?, notify?, name, updatedAt} —
+	* одним ключом, стейт только с asset-ссылками (слот лёгкий; полл-тик
+	* вообще не читает его на unchanged — см. K.statever)
+	*/
 	state: (id) => `lab:s/${id}`,
-	/** счётчик версий стейта слота (INCR при каждой записи) */
+	/**
+	* счётчик версий слота (INCR при каждой записи стейта И заявки/notify).
+	* Полл GET /api/state?since=N читает сначала ТОЛЬКО его (~16 байт) и не
+	* трогает слот, пока версия не свежее since — пустой тик стоит 1 команду.
+	*/
 	statever: (id) => `lab:s/${id}/ver`,
 	warnings: (id) => `lab:s/${id}/warnings`,
 	analysis: (id) => `lab:s/${id}/analysis`,
 	/** результат sweep по id (TTL не нужен — перетирается следующим заходом); id сессии в ключе, чтобы чужой sweep не читался */
-	sweep: (id, sweepId) => `lab:s/${id}/sweep/${sweepId}`
+	sweep: (id, sweepId) => `lab:s/${id}/sweep/${sweepId}`,
+	/** dataURL картинок стейта (контент-адресные, SETNX — переживают DELETE сессии: одинаковые кадры дедуплицируются между сессиями) */
+	asset: (hash) => `lab:asset:${hash}`
 };
 /** Вместимость индекса сессий: при переполнении выкидываем самые неактивные. */
 const SESSIONS_LIMIT = 50;
@@ -6555,6 +6839,54 @@ async function kvIncr(key) {
 }
 async function kvDelete(key) {
 	await kvRequest(`del/${encodeURIComponent(key)}`);
+}
+/** Есть ли ключ (EXISTS — микро-ответ; GET тянул бы тело значения). */
+async function kvExists(key) {
+	const result = await kvRequest(`exists/${encodeURIComponent(key)}`);
+	return Number(result) > 0;
+}
+/** Прочитать строковое значение ключа как есть (ассет — dataURL); null — ключа нет. */
+async function kvReadString(key) {
+	const result = await kvRequest(`get/${encodeURIComponent(key)}`);
+	return typeof result === "string" ? result : null;
+}
+/** sha256 → hex lowercase (серверная сторона ассетов). */
+function sha256Hex(text) {
+	return createHash("sha256").update(text, "utf8").digest("hex");
+}
+/**
+* Записать dataURL в ассет-ключ lab:asset:sha256-<hex> с SETNX-семантикой:
+* сначала EXISTS, существующий НЕ перезаписываем (повторная загрузка того же
+* кадра не тратит bandwidth на перезапись мегабайт). Хэш сверяется с телом —
+* ключи контент-адресные, на этом держится дедуп и кэш браузера.
+*/
+async function putAsset(hash, dataUrl) {
+	if (!ASSET_HASH_RE.test(hash)) throw new HttpError(400, { error: `невалидный hash ассета: ожидается sha256-<64 hex>` });
+	if (!dataUrl.startsWith("data:")) throw new HttpError(400, { error: "ассет — dataURL-строка (data:image/...;base64,...)" });
+	const key = K.asset(hash);
+	if (await kvExists(key)) return;
+	if (sha256Hex(dataUrl) !== hash.slice(7)) throw new HttpError(400, { error: "hash ассета не совпадает с содержимым dataURL" });
+	await kvRequest(`set/${encodeURIComponent(key)}`, {
+		method: "POST",
+		body: dataUrl
+	});
+}
+/** dataURL ассета по хэшу (GET /api/asset); null — ассета нет. */
+async function getAsset(hash) {
+	return kvReadString(K.asset(hash));
+}
+/**
+* Вынести dataURL-картинки стейта в ассет-ключи: слот остаётся лёгким, каждая
+* уникальная картинка пишется в KV один раз (SETNX в putAsset). Ссылки
+* asset:sha256-* проходят насквозь; легаси-инлайн (слоты до деплоя) конвертится
+* первым же писателем — отдельной миграции не нужно. Ассеты пишутся ДО записи
+* слота, чтобы ссылка из слота всегда резолвилась.
+*/
+async function lightenState(state) {
+	if (state === null) return null;
+	const { state: light, assets } = await extractAssetRefs(state, (dataUrl) => Promise.resolve(`sha256-${sha256Hex(dataUrl)}`));
+	if (assets !== void 0) for (const [hash, dataUrl] of Object.entries(assets)) await putAsset(hash, dataUrl);
+	return light;
 }
 /**
 * Незакрытые заявки (analysisReq/sweepReq) и непоказанное сообщение (notify)
@@ -6649,33 +6981,50 @@ async function ensureSession(id) {
 		updatedAt: Date.now()
 	};
 	await kvWriteJson(K.state(id), fresh);
+	await kvWriteJson(K.statever(id), 0);
 	await touchIndex(id, id);
 	return fresh;
 }
 /**
 * Записать новую версию стейта слота: INCR + write с сохранением ждущих заявок
-* analysisReq/sweepReq. Возвращает присвоенную версию. Бонусом — touchIndex:
-* живость сессии в списке /api/sessions и порядок eviction по ней же.
+* analysisReq/sweepReq. Картинки-dataURL выносятся в ассет-ключи (lightenState),
+* в слоте остаются ссылки. Возвращает присвоенную версию и незакрытые
+* заявки/notify слота ДО записи (pending; null — их не было). Бонусом —
+* touchIndex: живость сессии в списке /api/sessions и порядок eviction по ней же.
 */
 async function writeStateVersion(sessionId, state) {
 	const prev = await ensureSession(sessionId);
+	const light = await lightenState(state);
 	const version = await kvIncr(K.statever(sessionId));
 	await kvWriteJson(K.state(sessionId), withPending({
 		version,
-		state
+		state: light
 	}, prev));
 	await touchIndex(sessionId, prev.name);
-	return version;
+	let pending = null;
+	if (typeof prev.analysisReq === "string" || prev.sweepReq !== void 0 || prev.notify !== void 0) {
+		pending = {};
+		if (typeof prev.analysisReq === "string") pending.analysisReq = prev.analysisReq;
+		if (prev.sweepReq !== void 0) pending.sweepReq = prev.sweepReq;
+		if (prev.notify !== void 0) pending.notify = prev.notify;
+	}
+	return {
+		version,
+		pending
+	};
 }
 /**
-* Положить заявку sweep в слот (доставка приложению поллом; версия не
-* инкрементится — как у analysisReq) с сохранением analysisReq и notify.
+* Положить заявку sweep в слот (доставка приложению поллом) с сохранением
+* analysisReq и notify. Версия ИНКРЕМЕНТИТСЯ: полл сначала смотрит только
+* микро-ключ lab:s/<id>/ver и на unchanged слот не читает — заявку он заметит
+* исключительно по сурпу версии.
 */
 async function setSweepReq(sessionId, req) {
 	const st = await ensureSession(sessionId);
+	const state = await lightenState(st.state);
 	const next = {
-		version: st.version,
-		state: st.state,
+		version: await kvIncr(K.statever(sessionId)),
+		state,
 		name: st.name,
 		updatedAt: Date.now(),
 		sweepReq: req
@@ -6685,18 +7034,19 @@ async function setSweepReq(sessionId, req) {
 	await kvWriteJson(K.state(sessionId), next);
 }
 /**
-* Положить заявку анализа в слот (доставка приложению поллом; версия не
-* инкрементится) с сохранением sweep-заявки и notify. Единственный писатель
-* analysisReq кроме clearAnalysisReq — чтобы промах GET ?target= не стирал
-* чужую sweep-заявку. Идемпотентна: та же заявка не перезаписывается (без
-* лишних команд).
+* Положить заявку анализа в слот (доставка приложению поллом) с сохранением
+* sweep-заявки и notify. Версия инкрементится — как у setSweepReq (заявку полл
+* видит по микро-ключу версий). Единственный писатель analysisReq кроме
+* clearAnalysisReq — чтобы промах GET ?target= не стирал чужую sweep-заявку.
+* Идемпотентна: та же заявка не пишет и не инкрементит (без лишних команд).
 */
 async function setAnalysisReq(sessionId, key) {
 	const st = await ensureSession(sessionId);
 	if (st.analysisReq === key) return;
+	const state = await lightenState(st.state);
 	const next = {
-		version: st.version,
-		state: st.state,
+		version: await kvIncr(K.statever(sessionId)),
+		state,
 		name: st.name,
 		updatedAt: Date.now(),
 		analysisReq: key
@@ -6705,13 +7055,14 @@ async function setAnalysisReq(sessionId, key) {
 	if (st.notify !== void 0) next.notify = st.notify;
 	await kvWriteJson(K.state(sessionId), next);
 }
-/** Стереть заявку sweep по id (результат получен); анализ-заявку и notify сохраняет. */
+/** Стереть заявку sweep по id (результат получен); анализ-заявку и notify сохраняет. Версию не трогает. */
 async function clearSweepReq(sessionId, id) {
 	const st = await kvReadJson(K.state(sessionId));
 	if (st === null || st.sweepReq === void 0 || st.sweepReq.id !== id) return;
+	const state = await lightenState(st.state);
 	const next = {
 		version: st.version,
-		state: st.state,
+		state,
 		name: st.name,
 		updatedAt: st.updatedAt
 	};
@@ -6719,13 +7070,14 @@ async function clearSweepReq(sessionId, id) {
 	if (st.notify !== void 0) next.notify = st.notify;
 	await kvWriteJson(K.state(sessionId), next);
 }
-/** Стереть заявку анализа (свежий анализ получен); sweep-заявку и notify сохраняет. */
+/** Стереть заявку анализа (свежий анализ получен); sweep-заявку и notify сохраняет. Версию не трогает. */
 async function clearAnalysisReq(sessionId) {
 	const st = await kvReadJson(K.state(sessionId));
 	if (st === null || typeof st.analysisReq !== "string") return;
+	const state = await lightenState(st.state);
 	const next = {
 		version: st.version,
-		state: st.state,
+		state,
 		name: st.name,
 		updatedAt: st.updatedAt
 	};
@@ -6735,16 +7087,17 @@ async function clearAnalysisReq(sessionId) {
 }
 /**
 * Положить сообщение агента юзеру в слот (POST /api/notify): одно последнее,
-* новое перезаписывает старое; версия не инкрементится — как у заявок, полл
-* забирает notify тем же тиком. Соседние analysisReq/sweepReq сохраняет.
+* новое перезаписывает старое; версия инкрементится — как у заявок, полл
+* забирает notify по сурпу версий. Соседние analysisReq/sweepReq сохраняет.
 * Возвращает ts сообщения (клиент фильтрует показ по нему).
 */
 async function setNotify(sessionId, text) {
 	const st = await ensureSession(sessionId);
+	const state = await lightenState(st.state);
 	const ts = Date.now();
 	const next = {
-		version: st.version,
-		state: st.state,
+		version: await kvIncr(K.statever(sessionId)),
+		state,
 		name: st.name,
 		updatedAt: ts,
 		notify: {
@@ -6778,12 +7131,14 @@ async function upsertSession(id, name) {
 }
 /**
 * Удалить слот сессии (DELETE /api/sessions/<id>): стейт, счётчик версий,
-* warnings, analysis — заявки жили в слоте, удалились вместе с ним. Возвращает
-* false, если сессии не было. Ключи результатов sweep (lab:s/<id>/sweep/<uuid>)
-* не перечислимы без SCAN — остаются орфанными (не читаются без uuid,
-* перезатираются новыми sweep той же сессии). Для default заодно сносим
-* legacy-ключи, чтобы удаление было честным сбросом (иначе следующий заход
-* пере-мигрировал бы старьё).
+* warnings, analysis — заявки жили в слоте, удалились вместе с ним. Ассеты
+* lab:asset:* НЕ удаляются: ключи контент-адресные и дедуплицированы между
+* сессиями (один и тот же кадр в другой сессии ссылается на них же).
+* Возвращает false, если сессии не было. Ключи результатов sweep
+* (lab:s/<id>/sweep/<uuid>) не перечислимы без SCAN — остаются орфанными
+* (не читаются без uuid, перезатираются новыми sweep той же сессии). Для
+* default заодно сносим legacy-ключи, чтобы удаление было честным сбросом
+* (иначе следующий заход пере-мигрировал бы старьё).
 */
 async function deleteSession(id) {
 	if (await kvReadJson(K.state(id)) === null) return false;
@@ -6814,7 +7169,7 @@ async function deleteSession(id) {
 * делал SSE). Промах — это запись, поэтому при заданном LAB_API_TOKEN он
 * требует Bearer, как остальные агентские мутации (анти-спам заявок).
 */
-async function GET$11(req) {
+async function GET$12(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		const sessionId = sessionFromRequest(req);
@@ -6863,6 +7218,52 @@ async function POST$5(req) {
 		await kvWriteJson(K.analysis(sessionId), parsed.data);
 		await clearAnalysisReq(sessionId);
 		return json(200, { ok: true });
+	});
+}
+//#endregion
+//#region server/functions/asset.ts
+/**
+* hash ассета: из пути /api/asset/<hash> (на проде многосегментный путь
+* приходит сюда через rewrite vercel.json в query — УРОК P0) или напрямую из
+* query ?hash=. Поддерживаются ОБЕ формы; остальное — 400.
+*/
+function hashFromRequest(req) {
+	const segments = new URL(req.url, "http://localhost").pathname.replace(/^\/+|\/+$/g, "").split("/");
+	const hash = (segments[1] === "asset" ? segments[2] : void 0) ?? new URL(req.url, "http://localhost").searchParams.get("hash");
+	if (hash === null || hash === void 0 || !ASSET_HASH_RE.test(hash)) throw new HttpError(400, { error: "невалидный hash: ожидается sha256-<64 hex lowercase> (см. контракт ассетов в API.md)" });
+	return hash;
+}
+/**
+* GET /api/asset/<hash> — dataURL картинки стейта по ассет-ссылке
+* "asset:sha256-<hex>" (см. «Ассеты картинок» в API.md). Ответ — JSON
+* {dataURL}; 404 — ассета нет (микро-ответ). Чтение открыто, как у остального
+* API. Сами ассеты пишет сервер при записи стейта (SETNX) — агенту этот
+* эндпоинт нужен только чтобы разглядеть кадр.
+*/
+async function GET$11(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		const hash = hashFromRequest(req);
+		const dataUrl = await getAsset(hash);
+		if (dataUrl === null) return json(404, { error: `ассет ${hash} не найден` });
+		return json(200, { dataURL: dataUrl });
+	});
+}
+/**
+* PUT /api/asset/<hash> — положить dataURL (тело — сырая dataURL-строка)
+* с SETNX-семантикой: существующий ассет не перезаписывается. Хэш сверяется
+* с телом. Мутация — Authorization: Bearer при заданном LAB_API_TOKEN.
+*/
+async function PUT$3(req) {
+	return route(async () => {
+		if (!configured()) return notConfigured();
+		requireMutationAuth(req);
+		const hash = hashFromRequest(req);
+		await putAsset(hash, await readBody(req));
+		return json(200, {
+			ok: true,
+			hash
+		});
 	});
 }
 //#endregion
@@ -7275,31 +7676,42 @@ async function DELETE(req) {
 /**
 * GET /api/state — текущий стейт сессии (X-Lab-Session, default 'default';
 * несуществующая сессия создаётся лениво — пустой стейт). Без ?since — голый
-* BlockState (как в dev), 404 пока ничего не синкалось. С ?since=N —
-* поллинг-контракт: {version, state} при version > N, иначе {version: N,
-* unchanged: true} (не 404 — поллинг дешёвый: слот читается ровно 1 командой).
-* Попутно analysisRequest/sweepRequest — заявки агента (анализ таргета /
-* авто-перебор) и notify — последнее сообщение агента юзеру (тост), все живут
-* в том же слоте lab:s/<id> (замена SSE, см. API.md «Прод (Vercel)» и
-* «Сессии»).
+* BlockState (как в dev; картинки — asset-ссылками, см. «Ассеты картинок» в
+* API.md), 404 пока ничего не синкалось. С ?since=N — поллинг-контракт с
+* вер-тиком: СНАЧАЛА читается только микро-ключ lab:s/<id>/ver (~16 байт);
+* не свежее N — ответ {version: N, unchanged: true} БЕЗ чтения слота (пустой
+* тик = 1 команда); свежее (или микро-ключа нет — легаси-слот до деплоя) —
+* слот читается целиком: {version, state} при version > N, иначе
+* {version: N, unchanged: true} (не 404). Попутно analysisRequest/sweepRequest
+* — заявки агента и notify — тост; заявки и notify инкрементят версию, поэтому
+* вер-тик их замечает и читает слот (заявки в лёгком слоте — чтение дёшево).
 */
 async function GET$3(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
-		const stored = await ensureSession(sessionFromRequest(req));
+		const sessionId = sessionFromRequest(req);
+		const sinceRaw = new URL(req.url, "http://localhost").searchParams.get("since");
+		if (sinceRaw !== null) {
+			const since = Number(sinceRaw);
+			if (!Number.isInteger(since) || since < 0) throw new HttpError(400, { error: "?since должен быть неотрицательным целым" });
+			const ver = await kvReadJson(K.statever(sessionId));
+			if (ver !== null && Number.isInteger(ver) && ver <= since) return json(200, {
+				version: since,
+				unchanged: true
+			});
+		}
+		const stored = await ensureSession(sessionId);
 		const state = stored.state !== null ? stored.state : null;
 		const version = Number.isInteger(stored.version) ? stored.version : null;
 		const analysisRequest = typeof stored.analysisReq === "string" ? stored.analysisReq : void 0;
 		const reqField = analysisRequest === void 0 ? {} : { analysisRequest };
 		const sweepField = stored.sweepReq === void 0 ? {} : { sweepRequest: stored.sweepReq };
 		const notifyField = stored.notify === void 0 ? {} : { notify: stored.notify };
-		const sinceRaw = new URL(req.url, "http://localhost").searchParams.get("since");
 		if (sinceRaw === null) {
 			if (state === null || version === null) return json(404, { error: "стейт ещё не синкался: откройте приложение в браузере (оно шлёт POST /api/sync) или положите свой через PUT /api/state" });
 			return json(200, state);
 		}
 		const since = Number(sinceRaw);
-		if (!Number.isInteger(since) || since < 0) throw new HttpError(400, { error: "?since должен быть неотрицательным целым" });
 		if (state !== null && version !== null && version > since) return json(200, {
 			version,
 			state,
@@ -7316,20 +7728,23 @@ async function GET$3(req) {
 		});
 	});
 }
-/** PUT /api/state — положить стейт в сессию (валидация zod → INCR версии → запись). */
+/**
+* PUT /api/state — положить стейт в сессию. Тело — BlockState (картинки можно
+* инлайн-dataURL — сервер сам вынесет их в ассет-ключи) или транспортный вид
+* {state, assets} (заявки от браузера/симметрия с POST /api/sync). Валидация
+* zod → ассеты SETNX → INCR версии → запись лёгкого слота.
+*/
 async function PUT(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		requireMutationAuth(req);
 		const sessionId = sessionFromRequest(req);
-		const parsed = BlockStateSchema.safeParse(await readJsonBody(req));
-		if (!parsed.success) return json(400, {
-			error: "invalid BlockState",
-			issues: parsed.error.issues
-		});
+		const body = parseStateWithAssets(await readJsonBody(req));
+		if (body.assets !== void 0) for (const [hash, dataUrl] of Object.entries(body.assets)) await putAsset(hash, dataUrl);
+		const { version } = await writeStateVersion(sessionId, body.state);
 		return json(200, {
 			ok: true,
-			version: await writeStateVersion(sessionId, parsed.data)
+			version
 		});
 	});
 }
@@ -7432,30 +7847,37 @@ async function GET$1(req) {
 //#endregion
 //#region server/functions/sync.ts
 /**
-* Тело POST /api/sync: {state: BlockState} (браузер на проде) или голый
-* BlockState (как в dev — на случай вызова в стиле dev-цикла).
-*/
-const SyncBodySchema = union([object({ state: BlockStateSchema }), BlockStateSchema]);
-/**
 * POST /api/sync (прод-аналог dev POST /api/__sync) — браузер присылает свой
 * стейт (debounce 300ms) в слот своей сессии (X-Lab-Session из sessionStorage;
-* несуществующая создаётся лениво). Сервер сам инкрементит версию и пишет;
-* ответ {ok, version} — браузер запоминает «моя версия», чтобы поллинг не
-* возвращал её же обратно (эхо-петли нет: sync ничего не броадкастит).
+* несуществующая создаётся лениво). Тело — {state, assets?} (транспортный вид:
+* картинки-dataURL вынесены в словарь, в стейте — ссылки asset:sha256-*,
+* браузер готовит вид в lib/agentTransport) или голый BlockState (dev-стиль,
+* инлайн-картинки сервер вынесет сам). Ассеты кладутся SETNX до записи слота —
+* каждая уникальная картинка пишется в KV один раз. Ответ {ok, version} —
+* браузер запоминает «моя версия», чтобы поллинг не возвращал её же обратно
+* (эхо-петли нет: sync ничего не броадкастит). Ответ дополнительно несёт
+* заявки агента, записанные ДО синка (analysisRequest/sweepRequest/notify —
+* форма полей как у GET /api/state?since): гонка «заявка в версии N, синк
+* делает N+1» — вер-тик полла (ver <= since) заявку уже никогда не отдаст,
+* иначе заявка оставалась бы невидимой для браузера навсегда.
 */
 async function POST$1(req) {
 	return route(async () => {
 		if (!configured()) return notConfigured();
 		requireMutationAuth(req);
 		const sessionId = sessionFromRequest(req);
-		const parsed = SyncBodySchema.safeParse(await readJsonBody(req));
-		if (!parsed.success) return json(400, {
-			error: "invalid BlockState",
-			issues: parsed.error.issues
-		});
+		const body = parseStateWithAssets(await readJsonBody(req));
+		if (body.assets !== void 0) for (const [hash, dataUrl] of Object.entries(body.assets)) await putAsset(hash, dataUrl);
+		const { version, pending } = await writeStateVersion(sessionId, body.state);
+		const reqField = typeof pending?.analysisReq === "string" ? { analysisRequest: pending.analysisReq } : {};
+		const sweepField = pending?.sweepReq === void 0 ? {} : { sweepRequest: pending.sweepReq };
+		const notifyField = pending?.notify === void 0 ? {} : { notify: pending.notify };
 		return json(200, {
 			ok: true,
-			version: await writeStateVersion(sessionId, "state" in parsed.data ? parsed.data.state : parsed.data)
+			version,
+			...reqField,
+			...sweepField,
+			...notifyField
 		});
 	});
 }
@@ -7519,9 +7941,11 @@ async function fetch$1(req) {
 		case "GET state": return GET$3(req);
 		case "PUT state": return PUT(req);
 		case "POST sync": return POST$1(req);
+		case "GET asset": return GET$11(req);
+		case "PUT asset": return PUT$3(req);
 		case "GET warnings": return GET(req);
 		case "POST warnings": return POST(req);
-		case "GET analysis": return GET$11(req);
+		case "GET analysis": return GET$12(req);
 		case "POST analysis": return POST$5(req);
 		case "GET journal": return GET$10(req);
 		case "POST journal": return POST$4(req);

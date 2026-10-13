@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url';
 
 const FILES = [
     './prod-api.test.mjs',
+    './assets.test.mjs',
     './sync-gate.test.mjs',
     './analysis.test.mjs',
     './sweep-path.test.mjs',

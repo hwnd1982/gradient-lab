@@ -1,5 +1,6 @@
 import type { BlockState, Notify, SweepRequest } from '../schema';
 import { SweepReqSchema } from '../schema';
+import { apiUrl } from './apiUrl';
 import { applyAssetRefs, extractAssetRefs } from '../../shared/assets';
 import { fetchAssetImage } from './imageCache';
 import { currentSession } from './session';
@@ -134,7 +135,7 @@ export async function normalizedStateJson(state: unknown): Promise<string> {
  */
 export async function agentPost(path: AgentPath, body: unknown): Promise<Response | null> {
     try {
-        return await fetch(PATHS[path], {
+        return await fetch(apiUrl(PATHS[path]), {
             method: 'POST',
             headers: headers(),
             body: JSON.stringify(body),
@@ -207,7 +208,7 @@ export interface SyncReply extends AgentPending {
  */
 export async function agentSync(payload: StateUpload): Promise<SyncReply | null> {
     try {
-        const r = await fetch(PATHS.sync, {
+        const r = await fetch(apiUrl(PATHS.sync), {
             method: 'POST',
             headers: headers(),
             body: JSON.stringify(payload),
@@ -234,7 +235,7 @@ export interface StatePoll extends AgentPending {
 /** Поллинг версии стейта; null — сеть недоступна. */
 export async function pollState(since: number): Promise<StatePoll | null> {
     try {
-        const r = await fetch(`/api/state?since=${since}`, { headers: headers() });
+        const r = await fetch(apiUrl(`/api/state?since=${since}`), { headers: headers() });
         const j: unknown = await r.json();
         if (typeof j !== 'object' || j === null) return { status: r.status };
         const o = j as Record<string, unknown>;
@@ -263,7 +264,7 @@ export interface SessionInfo {
  */
 export async function fetchSessions(): Promise<SessionInfo[] | null> {
     try {
-        const r = await fetch('/api/sessions', { headers: headers() });
+        const r = await fetch(apiUrl('/api/sessions'), { headers: headers() });
         if (!r.ok) return null;
         const j: unknown = await r.json();
         const sessions = (j as { sessions?: unknown }).sessions;

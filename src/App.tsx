@@ -15,6 +15,7 @@ import {
     resolveStateImages,
     type AgentPending,
 } from './lib/agentTransport';
+import { apiUrl } from './lib/apiUrl';
 import { computeAnalysis } from './lib/analysis';
 import { pollDelayMs } from './lib/backoff';
 import { computeHint } from './lib/hint';
@@ -320,7 +321,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                     // контент не менялся (sweep восстановил исходное) — не шлём
                     if (json === lastSyncJson) return;
                     lastSyncJson = json;
-                    fetch('/api/__sync', {
+                    fetch(apiUrl('/api/__sync'), {
                         method: 'POST',
                         body: JSON.stringify(payload),
                     }).catch(() => {
@@ -338,7 +339,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
         let skipInitialEvent = false;
         const openEvents = () => {
             skipInitialEvent = hashLoadedRef.current;
-            es = new EventSource('/api/events');
+            es = new EventSource(apiUrl('/api/events'));
             es.onmessage = (ev: MessageEvent<string>) => {
                 let msg: {
                     type?: string;
@@ -427,7 +428,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
         let cancelled = false;
 
         // probe: если dev-API жив — поднимаем SSE и открываем файловые пресеты
-        fetch('/api/presets')
+        fetch(apiUrl('/api/presets'))
             .then((r) => {
                 if (!r.ok) throw new Error('agent api ответил не ok');
                 if (cancelled) return;

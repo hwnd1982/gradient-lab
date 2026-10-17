@@ -1,3 +1,5 @@
+import { apiUrl } from './apiUrl';
+
 const images = new Map<string, Promise<HTMLImageElement>>();
 const canvases = new Map<string, Promise<HTMLCanvasElement>>();
 
@@ -13,7 +15,7 @@ const assetDataUrls = new Map<string, Promise<string | null>>();
 export function fetchAssetImage(hash: string): Promise<string | null> {
     let entry = assetDataUrls.get(hash);
     if (entry === undefined) {
-        entry = fetch(`/api/asset/${hash}`)
+        entry = fetch(apiUrl(`/api/asset/${hash}`))
             .then(async (r): Promise<string | null> => {
                 if (r.status === 404) return null;
                 if (!r.ok) {

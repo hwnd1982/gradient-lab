@@ -12,6 +12,7 @@ import {
     saveUserPreset,
 } from '../presets/storage';
 import type { UserPreset } from '../presets/storage';
+import { apiUrl } from '../lib/apiUrl';
 import { useLabStore } from '../store';
 import type { BlockState } from '../types';
 import { TrashIcon } from './icons';
@@ -117,7 +118,7 @@ export function PresetDrawer({ onClose }: PresetDrawerProps) {
     const importRef = useRef<HTMLInputElement>(null);
 
     const refreshFiles = () => {
-        fetch('/api/presets')
+        fetch(apiUrl('/api/presets'))
             .then((r) => {
                 if (!r.ok) throw new Error('bad status');
                 return r.json() as Promise<{ files?: FilePreset[] }>;
@@ -163,7 +164,7 @@ export function PresetDrawer({ onClose }: PresetDrawerProps) {
     };
 
     const onDeleteFile = (presetName: string) => {
-        fetch(`/api/presets/${encodeURIComponent(presetName)}`, { method: 'DELETE' })
+        fetch(apiUrl(`/api/presets/${encodeURIComponent(presetName)}`), { method: 'DELETE' })
             .then(() => refreshFiles())
             .catch(() => {
                 // dev-сервер мог перезапуститься — просто обновим список

@@ -323,7 +323,7 @@ export function PresetDrawer({ onClose }: PresetDrawerProps) {
                         {filePresets !== null && (
                             <div className="mt-1 flex flex-col gap-2 border-t border-lab-border pt-2.5">
                                 <span className="px-1 text-[10px] tracking-wide text-lab-muted uppercase">
-                                    Файловые (Upstash / presets/)
+                                    Файловые (сервер / presets/)
                                 </span>
                                 {filePresets.length === 0 && (
                                     <p className="px-1 text-[10px] leading-snug text-lab-muted">

@@ -243,7 +243,7 @@ export function agentApi(): Plugin {
         }
 
         // методика подгонки v2 — из одного места (src/lib/methodology.ts);
-        // тот же ответ отдаёт прод api/methodology.ts, стейт/Upstash не нужны
+        // тот же ответ отдаёт lab-sync (/api/methodology), стейт сервера не нужен
         if (method === 'GET' && url.split('?')[0] === '/methodology') {
             sendJson(res, 200, METHODOLOGY);
             return;

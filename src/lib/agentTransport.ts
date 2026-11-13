@@ -12,9 +12,9 @@ import { currentSession } from './session';
  * формат запросов ровно тот же, что был до появления этого модуля. dev всегда
  * однопользовательский — сессии нет, заголовок не шлётся (сессия 'default').
  *
- * prod: те же данные уходят в Vercel-функции api/*.ts (/api/sync, /api/analysis,
- * /api/warnings, /api/journal — dev-имена /api/__* там работают через rewrites
- * в vercel.json); если задан VITE_LAB_TOKEN — добавляется Authorization: Bearer
+ * prod: те же данные уходят в standalone-сервис lab-sync (база env
+ * VITE_SYNC_BASE — см. lib/apiUrl.ts; /api/sync, /api/analysis, /api/warnings,
+ * /api/journal); если задан VITE_LAB_TOKEN — добавляется Authorization: Bearer
  * (мутации на проде можно закрыть env LAB_API_TOKEN). Прод мульти-сессионный:
  * каждый вызов несёт X-Lab-Session из sessionStorage (см. lib/session.ts) —
  * значение читается в момент вызова, чтобы селектор хедера переключал сессию
@@ -25,10 +25,10 @@ import { currentSession } from './session';
  * (sha256 от точной dataURL-строки), содержимое прикладывается словарём
  * assets в теле sync/PUT — сервер кладёт его в дедуплицированные ключи
  * SETNX-ом. Обратно чужой стейт приходит со ссылками — резолвим в dataURL
- * (кэш в imageCache). Итог: KV-слот лёгкий; KV-запись ассета происходит
- * один раз (SETNX), payload синка несёт dataURL каждый раз — квоту Upstash
- * это не тратит (EXISTS-микроответ), только Vercel-трафик (инцидент
- * bandwidth Upstash 12GB/10GB, 2026-10).
+ * (кэш в imageCache). Итог: слот сессии лёгкий; запись ассета происходит
+ * один раз (SETNX), payload синка несёт dataURL каждый раз — мегабайтные
+ * картинки не гоняются повторно (подход введён 2026-10 при прежнем
+ * KV-хранилище с жёстким лимитом bandwidth).
  */
 
 const IS_PROD = !import.meta.env.DEV;
@@ -146,9 +146,10 @@ export async function agentPost(path: AgentPath, body: unknown): Promise<Respons
 }
 
 /**
- * Заявки агента и notify в ответах полла и синка (одинаковые поля — см.
- * server/functions/state.ts и sync.ts): analysisRequest — заявка на анализ
- * таргета, sweepRequest — заявка на авто-перебор, notify — сообщение юзеру.
+ * Заявки агента и notify в ответах полла и синка (одинаковые поля у
+ * GET /api/state и POST /api/sync — контракт lab-sync): analysisRequest —
+ * заявка на анализ таргета, sweepRequest — заявка на авто-перебор, notify —
+ * сообщение юзеру.
  */
 export interface AgentPending {
     /** заявка агента на анализ таргета (замена SSE analysis-request); стирается POST /api/analysis */
@@ -260,7 +261,7 @@ export interface SessionInfo {
 
 /**
  * GET /api/sessions — список живых сессий (прод; чтение открыто). null — сеть
- * недоступна или прод-API не настроен (503): селектор покажет «не удалось».
+ * недоступна или сервер не ответил: селектор покажет «не удалось».
  */
 export async function fetchSessions(): Promise<SessionInfo[] | null> {
     try {

@@ -19,8 +19,7 @@ export function fetchAssetImage(hash: string): Promise<string | null> {
             .then(async (r): Promise<string | null> => {
                 if (r.status === 404) return null;
                 if (!r.ok) {
-                    // 429/5xx (штатные квотные ответы Upstash) — не кэшируем:
-                    // следующий тик повторит запрос
+                    // 429/5xx — не кэшируем: следующий тик повторит запрос
                     assetDataUrls.delete(hash);
                     return null;
                 }

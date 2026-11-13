@@ -13,7 +13,7 @@
 - [Гайд агента](#гайд-агента)
 - [Сессии и совместная работа](#сессии-и-совместная-работа)
 - [Быстрый старт](#быстрый-старт)
-- [Deploy на Vercel](#deploy-на-vercel)
+- [Deploy](#deploy)
 - [Архитектура](#архитектура)
 - [Тесты](#тесты)
 - [Лицензия](#лицензия)
@@ -75,7 +75,7 @@ Gradient Lab — интерактивная лаборатория одного 
 
 Полный цикл «макет → готовый CSS» с агентом занимает минут десять; руками можно то же самое, только дольше. Пошагово:
 
-1. **Откройте лабу.** Локально — `npm run dev` → <http://localhost:5180>, или публичный деплой на Vercel (см. [Deploy](#deploy-на-vercel)). В dev-режиме лаба однопользовательская (одна доска `default`); мульти-сессии — на проде.
+1. **Откройте лабу.** Локально — `npm run dev` → <http://localhost:5180>, или публичный деплой на Vercel (см. [Deploy](#deploy)). В dev-режиме лаба однопользовательская (одна доска `default`); мульти-сессии — на проде.
 
 2. **Создайте свою сессию** (прод). Кнопка **«Сессия: default»** в хедере → **«+ Создать сессию»** — id сгенерируется сам. Принцип «мой агент — моё окно»: ваш агент будет работать в слоте этой вкладки и не перетрёт чужие доски; `default` — общая доска для всех без своей сессии.
 
@@ -127,11 +127,11 @@ npm run dev      # http://localhost:5180 (+ dev Agent API, см. API.md)
 > (реестр машины автора). Если вам удобнее дефолтный npmjs — удалите эту строку
 > из `.npmrc` после клонирования, на работу проекта это не влияет.
 
-Прочие команды: `npm run build` (статика в `dist/` + бандлы функций в `api/`), `npm run lint`, `npm test`.
+Прочие команды: `npm run build` (статика в `dist/`), `npm run lint`, `npm test`.
 
-## Deploy на Vercel
+## Deploy
 
-`npm run build` собирает статику в `dist/` и самодостаточные бандлы функций в `api/` — Vercel подхватывает их автоматически (framework Vite, стор — Upstash Redis, бесплатного тарифа хватает). Пошаговый чеклист — [API.md](./API.md#прод-vercel), раздел «Setup». На любой другой static-хостинг собирается без API — приложение полностью работает и локально.
+`npm run build` собирает статику в `dist/` — Vercel раздаёт её как есть (framework Vite); `/api/*` на `*.vercel.app` отвечает 404 — агентский API прода живёт в sidecar-сервисе **lab-sync** (`~/its/lab-sync`, база `https://lkv.net.ru/api`, зашивается в бандл на сборке через `VITE_SYNC_BASE`). Пошаговый чеклист — [API.md](./API.md#прод-lab-sync), раздел «Прод (lab-sync)» / Setup. На любой другой static-хостинг собирается без API — приложение полностью работает и локально.
 
 ## Архитектура
 
@@ -141,9 +141,9 @@ npm run dev      # http://localhost:5180 (+ dev Agent API, см. API.md)
 - `src/targets.ts` — адресация градиентов (слой / маска / blur-маска / clipText / anim)
 - `src/components/` — Stage, Inspector, GradientEditor, CompareSection, AnimSection, PresetDrawer, CodePanel
 - `src/presets/` — встроенные приёмы из реальных проектов и localStorage-хранилище пользовательских
-- `src/lib/` — color, drag, autofit, imageCache, shareUrl (base64url в hash), agentTransport (клиент Agent API: dev-middleware / прод-поллинг)
+- `src/lib/` — color, drag, autofit, imageCache, shareUrl (base64url в hash), agentTransport (клиент Agent API: dev-middleware / прод — SSE + фолбэк-поллинг, `src/lib/backoff.ts`)
 - `vite-plugins/agent-api.ts` — dev Agent API (Vite-middleware + SSE)
-- `server/`, `shared/` — прод Agent API для Vercel (функции + Upstash REST-клиент + общие хелперы); `api/` — генерируемые самодостаточные бандлы из `server/functions` (сборка `scripts/build-functions.mjs`); источников в `api/` нет
+- `shared/` — общие хелперы Agent API (ассеты картинок, список таргетов анализа); используются dev-сервером и браузерным транспортом
 - `presets/` — файловые пресеты dev-сервера (пишутся UI и агентом)
 
 ## Тесты

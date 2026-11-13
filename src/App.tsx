@@ -79,16 +79,18 @@ function usePasteImage() {
  * агентского PUT, юзерские правки поверх — обычный last-writer-wins. dev
  * всегда однопользовательский: сессии нет ('default').
  *
- * прод: вместо SSE — поллинг версий GET /api/state?since=N раз в ~30с (пауза
- * при document.hidden; бэкофф до 150с при квоте/сбоях Upstash — lib/backoff).
- * Эхо закрыто по версиям: свой POST /api/sync запоминает присвоенную сервером
- * версию и поллинг её не возвращает (unchanged), чужую версию применяем и не
- * отсылаем обратно (identity-чек, как в dev); потерянный ответ синка страховён
- * контент-сверкой в applyForeign. Мульти-сессии: все вызовы несут
+ * прод: тот же SSE /api/events (свой lab-sync; сессия — query-параметром,
+ * EventSource не умеет заголовки). Версию SSE-пейлоад не несёт — её
+ * поддерживают POST /api/sync и полл. Если SSE не держится (3 ошибки подряд
+ * или readyState CLOSED) — фолбэк в поллинг версий GET /api/state?since=N
+ * (база 3с/потолок 30с, пауза при document.hidden; SSE в hidden не рвём)
+ * до конца жизни страницы — обратно не флапаем. Эхо закрыто контент-сверкой
+ * в applyForeign (свой POST /api/sync запоминает отправленную строку),
+ * потерянный ответ синка ею же подстрахован. Мульти-сессии: все вызовы несут
  * X-Lab-Session (транспорт читает sessionStorage на каждом запросе); смена
- * сессии (session-проп) перезапускает эффект — версии/эхо-строки сбрасываются,
- * поллинг новой сессии стартует немедленно (вид не трогаем). Полный контракт —
- * API.md «Прод (Vercel)» и «Сессии».
+ * сессии (session-проп) перезапускает эффект — версии/эхо-строки
+ * сбрасываются, канал новой сессии стартует немедленно (вид не трогаем).
+ * Полный контракт — API.md «Прод» и «Сессии».
  */
 function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
     const replace = useLabStore((s) => s.replace);
@@ -110,8 +112,10 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
         let hideTimer: number | undefined;
 
         if (!import.meta.env.DEV) {
-            // ── прод: поллинг версий (транспорт — src/lib/agentTransport.ts) ──
-            // версия, которую браузер уже видел (свой синк подтягивает её сразу)
+            // ── прод: SSE /api/events (lab-sync) + фолбэк-поллинг версий
+            // (транспорт — src/lib/agentTransport.ts) ──
+            // версия, которую браузер уже видел (свой синк подтягивает её сразу);
+            // SSE-пейлоад версии не несёт — её дают только POST /api/sync и полл
             let lastKnownVersion = 0;
             // ts последнего показанного notify (полл возвращает его всегда —
             // показываем только новее; сообщения не перезапрашиваются)
@@ -119,8 +123,16 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             // первую выдачу не затираем, если стейт пришёл из share-ссылки
             let firstPoll = true;
             let pollTimer: number | undefined;
-            // подряд неудачные тики (429/502/5xx от квоты Upstash, сеть) — бэкофф
+            // подряд неудачные полл-тики (сеть/429/5xx) — бэкофф (lib/backoff)
             let failures = 0;
+            // SSE-канал: 3 ошибки подряд или readyState CLOSED — поллинг до
+            // конца жизни страницы, обратно не флапаем
+            let sseFailures = 0;
+            let pollingOnly = false;
+            let es: EventSource | null = null;
+            // выдача из share-ссылки уже применена — initial-стейт при коннекте
+            // SSE не должен её затирать; сбрасывается после первого пропуска
+            let skipInitialEvent = false;
 
             /**
              * Заявки агента и notify — единая обработка для полл-тика и ответа
@@ -153,10 +165,9 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             };
 
             const send = (): void => {
-                // транспортный вид: dataURL → asset-ссылки (слот в KV лёгкий;
-                // KV-запись ассета происходит один раз (SETNX), payload синка
-                // несёт dataURL каждый раз — квоту Upstash это не тратит
-                // (EXISTS-микроответ), только Vercel-трафик)
+                // транспортный вид: dataURL → asset-ссылки (хранимый слот лёгкий;
+                // запись ассета на сервере происходит один раз (SETNX), payload
+                // синка несёт dataURL каждый раз — повторно не дублируется)
                 void prepareStateUpload(useLabStore.getState().state).then((payload) => {
                     const json = JSON.stringify(payload.state);
                     // контент не менялся (sweep восстановил исходное) — не шлём
@@ -169,6 +180,11 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                             return;
                         }
                         if (reply.version > lastKnownVersion) lastKnownVersion = reply.version;
+                        // свой стейт записан — флаг пропуска initial снимаем:
+                        // при пустом слоте initial не приходит вовсе (сервер
+                        // шлёт его только по непустому), а первое state-событие
+                        // после этого — уже реальный PUT, его нельзя съедать
+                        skipInitialEvent = false;
                         // заявки агента, записанные ДО синка (гонка «заявка в
                         // N, синк делает N+1» — вер-тик их уже не отдаст),
                         // обрабатываем тем же кодом, что и полл-тик
@@ -177,7 +193,9 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                 });
             };
 
-            const applyForeign = async (incoming: unknown, version: number): Promise<void> => {
+            // version задаёт только полл: SSE-стейт версии не несёт — тогда
+            // lastKnownVersion не трогаем (её дадут POST /api/sync и полл)
+            const applyForeign = async (incoming: unknown, version?: number): Promise<void> => {
                 // сверка в нормализованном refs-виде: пришедший стейт несёт
                 // asset-ссылки, локальный — dataURL; прямое сравнение давало бы
                 // ложное «изменилось» каждый тик (lib/agentTransport). Своё,
@@ -206,7 +224,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                 if (useLabStore.getState().sweeping) return;
                 // ссылка применяемого объекта: подписка по ней не шлёт /api/sync
                 justAppliedRef.current = resolved;
-                lastKnownVersion = version;
+                if (version !== undefined && version > lastKnownVersion) lastKnownVersion = version;
                 const prevState = useLabStore.getState().state;
                 replace(resolved, { undoable: false });
                 // индикация агентской активности: пачка PUT-ов агрегируется —
@@ -248,10 +266,9 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                     arm();
                     return;
                 }
-                if (res.status === 503) return; // прод-API не настроен — поллинг не поднимаем
                 if (res.status === 429 || res.status >= 500) {
-                    // квота/сбой Upstash (их 429 приходит к нам как 502) — бэкофф;
-                    // при сбросе квоты поллинг сам вернётся к базе
+                    // сбой сервера/сеть/транзиентный 503 прокси — бэкофф до
+                    // потолка; живой ответ вернёт поллинг к базе
                     failures += 1;
                     arm();
                     return;
@@ -277,9 +294,11 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             };
 
             const onVisibility = (): void => {
-                if (!document.hidden) {
+                // проснулись — сразу, не ждём таймера; пауза скрытости — только
+                // у поллинга (SSE в hidden не рвём)
+                if (!document.hidden && pollingOnly) {
                     window.clearTimeout(pollTimer);
-                    void poll(); // проснулись — сразу, не ждём таймера
+                    void poll();
                 }
             };
             document.addEventListener('visibilitychange', onVisibility);
@@ -293,13 +312,120 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
                 window.clearTimeout(timer);
                 timer = window.setTimeout(send, 300);
             });
-            void poll();
+            // SSE-канал: при коннекте сервер шлёт retry 2с и текущий стейт,
+            // дальше — события мутаций и heartbeat каждые 25с. Сессия —
+            // query-параметром: EventSource не умеет заголовки
+            const openSse = (): void => {
+                skipInitialEvent = hashLoadedRef.current;
+                es = new EventSource(
+                    apiUrl('/api/events') + `?session=${encodeURIComponent(session)}`
+                );
+                es.onopen = (): void => {
+                    sseFailures = 0; // канал жив — счётчик ошибок подряд сброшен
+                };
+                es.onerror = (): void => {
+                    // EventSource сам переподключается (retry 2с); копим ошибки
+                    // подряд и после трёх (или явного CLOSED — сервер запретил
+                    // reconnect) навсегда уходим в поллинг: первый тик poll с
+                    // текущей lastKnownVersion захватывает версию/выдачу
+                    // (нулевая — полный запрос стейта)
+                    sseFailures += 1;
+                    if (
+                        sseFailures >= 3 ||
+                        (es !== null && es.readyState === EventSource.CLOSED)
+                    ) {
+                        if (pollingOnly) return;
+                        pollingOnly = true;
+                        es?.close();
+                        es = null;
+                        void poll();
+                    }
+                };
+                // NB: analysis-request/sweep-request/notify/journal-cleared —
+                // копии dev-ветки (es.onmessage ниже по эффекту): править синхронно
+                es.onmessage = (ev: MessageEvent<string>): void => {
+                    let msg: {
+                        type?: string;
+                        state?: unknown;
+                        target?: unknown;
+                        id?: unknown;
+                        req?: unknown;
+                        text?: unknown;
+                    };
+                    try {
+                        msg = JSON.parse(ev.data);
+                    } catch {
+                        return;
+                    }
+                    // заявка агента на анализ таргета — тот же обработчик, что у
+                    // pending-поля полла (applyPending)
+                    if (msg.type === 'analysis-request') {
+                        if (typeof msg.target === 'string') {
+                            const t = targetFromString(msg.target);
+                            if (t !== null) setAnalysisTarget(t);
+                        }
+                        return;
+                    }
+                    // заявка на авто-перебор — эквивалент pending sweepRequest:
+                    // валидация req на месте, повторные доставки того же id —
+                    // no-op в сторе (исполняет useSweepSync)
+                    if (msg.type === 'sweep-request') {
+                        if (
+                            typeof msg.id === 'string' &&
+                            typeof msg.req === 'object' &&
+                            msg.req !== null
+                        ) {
+                            const parsed = SweepReqSchema.safeParse(msg.req);
+                            if (parsed.success) {
+                                useLabStore.getState().requestSweep({ id: msg.id, req: parsed.data });
+                            }
+                        }
+                        return;
+                    }
+                    // сообщение агента юзеру — тост «Агент: …» тем же
+                    // механизмом agentNote; SSE-пейлоад ts не несёт — гейт
+                    // lastSeenNotifyTs неприменим (дубль возможен только через
+                    // pending при последующем переходе в поллинг)
+                    if (msg.type === 'notify') {
+                        if (typeof msg.text === 'string' && msg.text !== '') {
+                            window.clearTimeout(showTimer);
+                            window.clearTimeout(hideTimer);
+                            setAgentNote(`Агент: ${msg.text}`);
+                            hideTimer = window.setTimeout(() => setAgentNote(null), 4000);
+                        }
+                        return;
+                    }
+                    // агент очистил журнал (DELETE /api/journal) — локальное
+                    // зеркало тоже чистим, иначе hint «плато радиуса» видит
+                    // удалённые записи (обработчик тот же, что в dev-ветке)
+                    if (msg.type === 'journal-cleared') {
+                        useLabStore.getState().clearJournal();
+                        return;
+                    }
+                    if (msg.type !== 'state' || msg.state === undefined) return;
+                    // sweep исполняется — входящие стейты не применяем до
+                    // завершения (PUT до done/aborted — нарушение протокола)
+                    if (useLabStore.getState().sweeping) return;
+                    if (skipInitialEvent) {
+                        // стейт из share-ссылки свежее initial-кэша сервера —
+                        // выдачу пропускаем, дальше PUT-ы применяются штатно
+                        skipInitialEvent = false;
+                        hashLoadedRef.current = false;
+                        return;
+                    }
+                    // версию не adopting (см. сигнатуру applyForeign): SSE её
+                    // не знает; эхо закрыто контент-сверкой внутри
+                    void applyForeign(msg.state);
+                };
+            };
+            openSse();
 
             return () => {
                 document.removeEventListener('visibilitychange', onVisibility);
                 unsubscribe();
                 window.clearTimeout(timer);
                 window.clearTimeout(pollTimer);
+                es?.close();
             };
         }
 
@@ -447,7 +573,7 @@ function useAgentSync(hashLoadedRef: RefObject<boolean>, session: string) {
             window.clearTimeout(hideTimer);
             es?.close();
         };
-    }, [replace, setDevApiAvailable, setAnalysisTarget, hashLoadedRef, session]);
+    }, [replace, setDevApiAvailable, setAnalysisTarget, setAgentNote, hashLoadedRef, session]);
 }
 
 /** Изменённые пути dot-notation: глубина ≤ 3 сегментов, значения не собираем. */

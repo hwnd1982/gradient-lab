@@ -3,16 +3,16 @@
  * ESM-модуль (сторона эффектов), экспортирует live-binding счётчики
  * {total, failed}. Раннер суммирует и ставит exitCode.
  *
- * Импорт TS-хендлеров — через jiti (уже в дереве: транзитивная зависимость
- * vite@8 для загрузки vite.config.ts; api/*.ts при этом используют .ts-
- * расширения, а src/store.ts — extensionless-импорты, нативный strip-types
- * их не резолвит). jiti-мок-подход: global.fetch подменяется на in-memory
- * Upstash REST (Map) — см. prod-api.test.mjs.
+ * Импорт TS-модулей — через jiti (уже в дереве: транзитивная зависимость
+ * vite@8 для загрузки vite.config.ts; тесты импортируют .ts-расширения
+ * напрямую, а внутри src/ — extensionless-импорты, нативный strip-types их
+ * не резолвит). jiti-мок-подход: global.fetch подменяется на in-memory
+ * Map (мок хранилища сервера).
  */
 import { pathToFileURL } from 'node:url';
 
 const FILES = [
-    './prod-api.test.mjs',
+    './lab-sync-api.test.mjs',
     './assets.test.mjs',
     './sync-gate.test.mjs',
     './analysis.test.mjs',

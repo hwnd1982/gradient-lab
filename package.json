@@ -28,7 +28,7 @@
     "homepage": "https://github.com/hwnd1982/gradient-lab#readme",
     "scripts": {
         "dev": "vite",
-        "build": "tsc -b && vite build && node scripts/build-functions.mjs",
+        "build": "tsc -b && vite build",
         "lint": "oxlint",
         "test": "node tests/run.mjs",
         "preview": "vite preview",

@@ -168,8 +168,8 @@ export type BlurLayer = z.infer<typeof BlurLayerSchema>;
 /**
  * Плоский blur старого формата (до слоёв): {enabled, radius, background,
  * gradient, mask, rect} — заворачивается в layers[0] всегда, независимо от
- * enabled (при включении тумблера слой уже готов). Старые сессии Upstash,
- * пресеты и share-хэши остаются валидными.
+ * enabled (при включении тумблера слой уже готов). Старые сессии (в т.ч.
+ * из прежнего KV-хранилища), пресеты и share-хэши остаются валидными.
  */
 const FLAT_BLUR_KEYS = ['radius', 'background', 'gradient', 'mask', 'rect'] as const;
 
